@@ -225,6 +225,21 @@ class ModelCtlTests(unittest.TestCase):
             rm = subprocess.run([sys.executable, "-m", "modelctl.cli", "registry", "remove", "managed-model", "--registry", str(managed)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(rm.returncode, 0, rm.stderr + rm.stdout)
             self.assertFalse((managed / "managed-model.toml").exists())
+    def test_init_and_version_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = root / "modelctl.toml"
+            init = subprocess.run([sys.executable, "-m", "modelctl.cli", "init", "--output", str(out), "--model-id", "init-model"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(init.returncode, 0, init.stderr + init.stdout)
+            init_body = json.loads(init.stdout)
+            self.assertTrue(init_body["ok"], init_body)
+            self.assertEqual(load_manifest(out).model_id, "init-model")
+            duplicate = subprocess.run([sys.executable, "-m", "modelctl.cli", "init", "--output", str(out)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(duplicate.returncode, 2, duplicate.stderr + duplicate.stdout)
+            version = subprocess.run([sys.executable, "-m", "modelctl.cli", "version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(version.returncode, 0, version.stderr + version.stdout)
+            version_body = json.loads(version.stdout)
+            self.assertRegex(version_body["version"], r"^\d+\.\d+\.\d+$")
 
 
 if __name__ == "__main__":

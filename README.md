@@ -7,6 +7,13 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 ## Install
 
 ```bash
+python3.11 -m pip install \
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.6.0/local_modelctl-0.6.0-py3-none-any.whl
+```
+
+For local development:
+
+```bash
 python3.11 -m pip install -e .
 ```
 
@@ -19,11 +26,17 @@ python3.11 -m modelctl.cli --help
 ## Quickstart
 
 ```bash
-# Option A: start from an example.
+modelctl version
+
+# Option A: generate a starter manifest.
+modelctl init --template llama-cpp --model-id local-model --output modelctl.toml
+$EDITOR modelctl.toml
+
+# Option B: start from an example.
 cp examples/llama-cpp.example.toml modelctl.toml
 $EDITOR modelctl.toml
 
-# Option B: ingest a running OpenAI-compatible endpoint.
+# Option C: ingest a running OpenAI-compatible endpoint.
 modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 
 modelctl validate
@@ -91,6 +104,8 @@ safe = true
 
 ## Commands
 
+- `version` — print installed modelctl version.
+- `init --template minimal|llama-cpp --output modelctl.toml` — generate a starter manifest.
 - `validate` — parse manifest and print resolved summary.
 - `ingest --endpoint URL --output modelctl.toml` — generate a starter manifest from a running `/v1/models` endpoint.
 - `list` — convenience alias for `registry list`; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.

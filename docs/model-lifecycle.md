@@ -24,7 +24,11 @@ A model is not "installed" until all of this is true:
 Minimum useful gate:
 
 ```bash
+# Create modelctl.toml one of two ways:
+modelctl init --template llama-cpp --model-id local-model --output modelctl.toml --overwrite
+# or, if the endpoint is already running:
 modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
+
 modelctl registry add --source modelctl.toml --name local-test
 modelctl registry use local-test --output modelctl.toml --overwrite
 modelctl preflight -m modelctl.toml

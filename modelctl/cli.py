@@ -5,12 +5,14 @@ import json
 import sys
 
 from .bench_artifacts import write_bench_artifact
+from .init import init_manifest
 from .ingest import ingest
 from .manifest import ManifestError, load_manifest
 from .ops import bench, cleanup_execute, cleanup_plan, doctor, preflight, smoke, soak, status, validate, watchdog
 from .registry import add_registry, list_registry, remove_registry, show_registry, use_registry
 from .report import write_report
 from .runner import start, stop, wait_ready
+from . import __version__
 
 MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "smoke", "soak", "bench", "doctor", "watchdog", "report", "cleanup"}
 BENCH_PRESETS = {
@@ -66,6 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modelctl", description="Manifest-driven lifecycle control for local LLM servers.")
     parser.add_argument("-m", "--manifest", default="modelctl.toml", help="Path to model manifest TOML")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("version", help="Print modelctl version")
+    p_init = sub.add_parser("init", help="Write a starter modelctl.toml manifest")
+    p_init.add_argument("--output", "-o", default="modelctl.toml")
+    p_init.add_argument("--template", choices=["minimal", "llama-cpp"], default="minimal")
+    p_init.add_argument("--model-id", default="local-model")
+    p_init.add_argument("--endpoint", default="http://127.0.0.1:8080/v1")
+    p_init.add_argument("--id", dest="ident", default=None)
+    p_init.add_argument("--port", type=int, default=8080)
+    p_init.add_argument("--overwrite", action="store_true")
     sub.add_parser("validate", help="Parse manifest and print resolved summary")
     sub.add_parser("preflight", help="Run required path, port, disk, and swap checks")
     p_list = sub.add_parser("list", help="List manifests in registry directories")
@@ -120,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "version":
+            emit({"version": __version__}); return 0
+        if args.command == "init":
+            result = init_manifest(output=args.output, template=args.template, model_id=args.model_id, endpoint=args.endpoint, ident=args.ident, port=args.port, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
         if args.command == "list":
             emit(list_registry(args.registry)); return 0
         if args.command == "registry":

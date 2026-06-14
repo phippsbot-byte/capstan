@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.0
+
+- Add tag-based GitHub Actions release automation that builds wheel/sdist, verifies the wheel, and uploads assets to the GitHub release.
+- Add manual PyPI Trusted Publishing workflow for `local-modelctl` once PyPI-side publisher trust is configured.
+- Add `modelctl init` for starter `modelctl.toml` manifests.
+- Add `modelctl version`.
+- Make CI build distributions on every push/PR so packaging breakage is caught before tags.
+
 ## v0.5.0
 
 - Add `modelctl registry use NAME` to materialize a registered manifest into a working `modelctl.toml` by copy or symlink.
