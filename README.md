@@ -25,6 +25,8 @@ modelctl validate
 modelctl preflight
 modelctl start --wait
 modelctl smoke
+modelctl soak --count 3
+modelctl doctor
 modelctl status
 modelctl cleanup          # dry-run
 modelctl stop
@@ -79,11 +81,14 @@ safe = true
 ## Commands
 
 - `validate` — parse manifest and print resolved summary.
+- `list` — list manifests in registry directories; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
+- `doctor` — run preflight/status/cleanup review and report stale PID/log/endpoint issues.
 - `smoke` — run OpenAI-compatible `/chat/completions` exact-output smoke.
+- `soak --count N` — run repeated smoke tests with timing and swap sampling.
 - `cleanup` — dry-run cleanup candidates.
 - `cleanup --execute` — delete only candidates marked `safe = true`.
 - `cleanup --execute --force` — delete unsafe candidates too. Sharp knife; don't juggle it.

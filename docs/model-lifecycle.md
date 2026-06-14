@@ -27,6 +27,8 @@ Minimum useful gate:
 modelctl preflight -m modelctl.toml
 modelctl start -m modelctl.toml --wait
 modelctl smoke -m modelctl.toml
+modelctl soak -m modelctl.toml --count 3
+modelctl doctor -m modelctl.toml
 modelctl status -m modelctl.toml
 ```
 

@@ -147,8 +147,35 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(smoke.returncode, 0, smoke.stderr + smoke.stdout)
             body = json.loads(smoke.stdout)
             self.assertTrue(body["exact"], body)
+            soak = subprocess.run(cmd + ["soak", "--count", "2"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(soak.returncode, 0, soak.stderr + soak.stdout)
+            soak_body = json.loads(soak.stdout)
+            self.assertTrue(soak_body["ok"], soak_body)
+            self.assertEqual(soak_body["completed_count"], 2)
+            doctor = subprocess.run(cmd + ["doctor"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(doctor.returncode, 0, doctor.stderr + doctor.stdout)
+            doctor_body = json.loads(doctor.stdout)
+            self.assertTrue(doctor_body["ok"], doctor_body)
             stop = subprocess.run(cmd + ["stop"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(stop.returncode, 0, stop.stderr + stop.stdout)
+    def test_registry_list_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            manifest_path = self.write_manifest(registry, '''
+                [model]
+                id = "registered"
+                model_id = "registered-model"
+                endpoint = "http://127.0.0.1:9/v1"
+            ''')
+            manifest_path.rename(registry / "registered.toml")
+            cmd = [sys.executable, "-m", "modelctl.cli", "list", "--registry", str(registry)]
+            result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            body = json.loads(result.stdout)
+            self.assertEqual(body["count"], 1)
+            self.assertEqual(body["entries"][0]["id"], "registered")
 
 
 if __name__ == "__main__":

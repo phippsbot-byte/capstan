@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import shutil
+import time
 
 from .http import http_json
 from .manifest import ModelManifest
@@ -102,3 +103,94 @@ def cleanup_execute(manifest: ModelManifest, force: bool = False) -> dict[str, A
             p.unlink()
         deleted.append(row)
     return {"deleted": deleted, "skipped": skipped}
+
+
+def soak(manifest: ModelManifest, count: int = 3, delay_sec: float = 0.0, fail_fast: bool = True) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    swap_before = swap_used_gib()
+    started = time.time()
+    for idx in range(1, count + 1):
+        before = swap_used_gib()
+        t0 = time.time()
+        result = smoke(manifest)
+        elapsed = time.time() - t0
+        after = swap_used_gib()
+        row = {
+            "index": idx,
+            "ok": result.get("ok"),
+            "exact": result.get("exact"),
+            "status": result.get("status"),
+            "elapsed_s": round(elapsed, 3),
+            "swap_before_gib": None if before is None else round(before, 3),
+            "swap_after_gib": None if after is None else round(after, 3),
+            "swap_delta_gib": None if before is None or after is None else round(after - before, 3),
+            "usage": result.get("usage"),
+            "content_preview": (result.get("content") or "")[:200],
+        }
+        runs.append(row)
+        if fail_fast and not row["ok"]:
+            break
+        if delay_sec > 0 and idx < count:
+            time.sleep(delay_sec)
+    swap_after = swap_used_gib()
+    elapsed_values = [r["elapsed_s"] for r in runs]
+    return {
+        "ok": bool(runs) and all(bool(r.get("ok")) for r in runs) and len(runs) == count,
+        "requested_count": count,
+        "completed_count": len(runs),
+        "total_elapsed_s": round(time.time() - started, 3),
+        "min_elapsed_s": min(elapsed_values) if elapsed_values else None,
+        "max_elapsed_s": max(elapsed_values) if elapsed_values else None,
+        "swap_before_gib": None if swap_before is None else round(swap_before, 3),
+        "swap_after_gib": None if swap_after is None else round(swap_after, 3),
+        "swap_delta_gib": None if swap_before is None or swap_after is None else round(swap_after - swap_before, 3),
+        "runs": runs,
+    }
+
+
+def _tail_text(path: Path, max_bytes: int = 4096) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    with path.open("rb") as fh:
+        try:
+            fh.seek(max(0, path.stat().st_size - max_bytes))
+        except OSError:
+            return None
+        return fh.read().decode("utf-8", "replace")
+
+
+def doctor(manifest: ModelManifest) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    pf = preflight(manifest)
+    st = status(manifest)
+    plan = cleanup_plan(manifest)
+
+    if not pf.get("ok"):
+        issues.append({"code": "preflight_failed", "detail": pf})
+    if manifest.start is None:
+        warnings.append({"code": "no_start_section", "message": "Manifest can inspect/smoke an existing endpoint but cannot start it."})
+    pid_state = read_pid_state(manifest)
+    if pid_state and active_pid(manifest) is None:
+        warnings.append({"code": "stale_pid_state", "pid_state": pid_state})
+    readiness = st.get("readiness") or {}
+    if not readiness.get("ready"):
+        warnings.append({"code": "endpoint_not_ready", "detail": readiness})
+    unsafe = [c for c in plan["candidates"] if c.get("exists") and not c.get("safe")]
+    if unsafe:
+        warnings.append({"code": "unsafe_cleanup_candidates", "count": len(unsafe), "candidates": unsafe})
+    if manifest.start:
+        log_path = default_log_path(manifest)
+        if not log_path.exists():
+            warnings.append({"code": "log_missing", "path": str(log_path)})
+        else:
+            st["log_tail"] = _tail_text(log_path)
+
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "warnings": warnings,
+        "preflight": pf,
+        "status": st,
+        "cleanup": plan,
+    }
