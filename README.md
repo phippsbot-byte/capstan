@@ -19,14 +19,21 @@ python3.11 -m modelctl.cli --help
 ## Quickstart
 
 ```bash
+# Option A: start from an example.
 cp examples/llama-cpp.example.toml modelctl.toml
 $EDITOR modelctl.toml
+
+# Option B: ingest a running OpenAI-compatible endpoint.
+modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
+
 modelctl validate
 modelctl preflight
 modelctl start --wait
 modelctl smoke
 modelctl soak --count 3
+modelctl bench --prompt-chars 128,1024 --repeats 1
 modelctl doctor
+modelctl watchdog --max-swap-gib 4 --duration 0
 modelctl status
 modelctl cleanup          # dry-run
 modelctl stop
@@ -81,6 +88,7 @@ safe = true
 ## Commands
 
 - `validate` — parse manifest and print resolved summary.
+- `ingest --endpoint URL --output modelctl.toml` — generate a starter manifest from a running `/v1/models` endpoint.
 - `list` — list manifests in registry directories; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
@@ -89,6 +97,8 @@ safe = true
 - `doctor` — run preflight/status/cleanup review and report stale PID/log/endpoint issues.
 - `smoke` — run OpenAI-compatible `/chat/completions` exact-output smoke.
 - `soak --count N` — run repeated smoke tests with timing and swap sampling.
+- `bench --prompt-chars 128,1024` — run synthetic prompt-size benchmarks and capture server timings when available.
+- `watchdog --max-swap-gib N` — sample readiness/swap and optionally stop the manifest process on breach.
 - `cleanup` — dry-run cleanup candidates.
 - `cleanup --execute` — delete only candidates marked `safe = true`.
 - `cleanup --execute --force` — delete unsafe candidates too. Sharp knife; don't juggle it.

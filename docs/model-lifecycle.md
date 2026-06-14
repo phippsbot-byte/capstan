@@ -24,11 +24,14 @@ A model is not "installed" until all of this is true:
 Minimum useful gate:
 
 ```bash
+modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 modelctl preflight -m modelctl.toml
 modelctl start -m modelctl.toml --wait
 modelctl smoke -m modelctl.toml
 modelctl soak -m modelctl.toml --count 3
+modelctl bench -m modelctl.toml --prompt-chars 128,1024 --repeats 1
 modelctl doctor -m modelctl.toml
+modelctl watchdog -m modelctl.toml --max-swap-gib 4 --duration 0
 modelctl status -m modelctl.toml
 ```
 

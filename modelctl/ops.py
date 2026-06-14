@@ -7,7 +7,7 @@ import time
 
 from .http import http_json
 from .manifest import ModelManifest
-from .runner import active_pid, default_log_path, default_pid_path, readiness_check, read_pid_state
+from .runner import active_pid, default_log_path, default_pid_path, readiness_check, read_pid_state, stop
 from .system import disk_free_gib, human_bytes, path_size_bytes, port_is_free, swap_used_gib
 
 
@@ -194,3 +194,89 @@ def doctor(manifest: ModelManifest) -> dict[str, Any]:
         "status": st,
         "cleanup": plan,
     }
+
+
+def _synthetic_prompt(prompt_chars: int) -> str:
+    prefix = "Read the filler text, then reply exactly BENCH_OK.\n\nFILLER:\n"
+    suffix = "\n\nReply exactly BENCH_OK."
+    filler_len = max(0, prompt_chars - len(prefix) - len(suffix))
+    pattern = "alpha beta gamma delta epsilon zeta eta theta "
+    filler = (pattern * ((filler_len // len(pattern)) + 1))[:filler_len]
+    return prefix + filler + suffix
+
+
+def bench(manifest: ModelManifest, prompt_chars: list[int], repeats: int = 1, max_tokens: int = 16) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    swap_before = swap_used_gib()
+    started = time.time()
+    for chars in prompt_chars:
+        for repeat in range(1, repeats + 1):
+            prompt = _synthetic_prompt(chars)
+            before = swap_used_gib()
+            t0 = time.time()
+            result = smoke(manifest, prompt=prompt, expect="BENCH_OK", max_tokens=max_tokens, temperature=0)
+            elapsed = time.time() - t0
+            after = swap_used_gib()
+            raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+            rows.append({
+                "prompt_chars": chars,
+                "repeat": repeat,
+                "ok": result.get("ok"),
+                "exact": result.get("exact"),
+                "status": result.get("status"),
+                "elapsed_s": round(elapsed, 3),
+                "usage": result.get("usage"),
+                "timings": raw.get("timings") if isinstance(raw, dict) else None,
+                "swap_before_gib": None if before is None else round(before, 3),
+                "swap_after_gib": None if after is None else round(after, 3),
+                "swap_delta_gib": None if before is None or after is None else round(after - before, 3),
+                "content_preview": (result.get("content") or "")[:200],
+            })
+    swap_after = swap_used_gib()
+    return {
+        "ok": bool(rows) and all(bool(r.get("ok")) for r in rows),
+        "prompt_chars": prompt_chars,
+        "repeats": repeats,
+        "total_elapsed_s": round(time.time() - started, 3),
+        "swap_before_gib": None if swap_before is None else round(swap_before, 3),
+        "swap_after_gib": None if swap_after is None else round(swap_after, 3),
+        "swap_delta_gib": None if swap_before is None or swap_after is None else round(swap_after - swap_before, 3),
+        "runs": rows,
+    }
+
+
+def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duration_sec: float = 0.0, interval_sec: float = 10.0, stop_on_breach: bool = False) -> dict[str, Any]:
+    samples: list[dict[str, Any]] = []
+    deadline = time.time() + max(0.0, duration_sec)
+    breached = False
+    stop_result: dict[str, Any] | None = None
+    while True:
+        used = swap_used_gib()
+        ready = False
+        readiness_error = None
+        try:
+            ready = bool(readiness_check(manifest, timeout=5).get("ready"))
+        except Exception as exc:
+            readiness_error = f"{type(exc).__name__}: {exc}"
+        sample = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "pid": active_pid(manifest),
+            "ready": ready,
+            "swap_used_gib": None if used is None else round(used, 3),
+            "readiness_error": readiness_error,
+        }
+        if max_swap_gib is not None and used is not None and used > max_swap_gib:
+            sample["breach"] = "swap"
+            breached = True
+        if readiness_error is not None or not ready:
+            sample["breach"] = sample.get("breach") or "readiness"
+            breached = True
+        samples.append(sample)
+        if breached:
+            if stop_on_breach:
+                stop_result = stop(manifest)
+            break
+        if duration_sec <= 0 or time.time() >= deadline:
+            break
+        time.sleep(max(0.1, interval_sec))
+    return {"ok": not breached, "breached": breached, "max_swap_gib": max_swap_gib, "duration_sec": duration_sec, "interval_sec": interval_sec, "stop_on_breach": stop_on_breach, "stop_result": stop_result, "samples": samples}

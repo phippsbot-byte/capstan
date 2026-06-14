@@ -109,9 +109,10 @@ class ModelCtlTests(unittest.TestCase):
                             self._send({'error':'not found'}, 404)
                     def do_POST(self):
                         n=int(self.headers.get('Content-Length','0'))
-                        _=self.rfile.read(n)
+                        body=self.rfile.read(n).decode()
                         if self.path == '/v1/chat/completions':
-                            self._send({'choices':[{'message':{'content':'pong'},'finish_reason':'stop'}], 'usage': {'completion_tokens': 1}})
+                            content='BENCH_OK' if 'BENCH_OK' in body else 'pong'
+                            self._send({'choices':[{'message':{'content':content},'finish_reason':'stop'}], 'usage': {'completion_tokens': 1}})
                         else:
                             self._send({'error':'not found'}, 404)
                 HTTPServer(('127.0.0.1', port), H).serve_forever()
@@ -156,6 +157,21 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(doctor.returncode, 0, doctor.stderr + doctor.stdout)
             doctor_body = json.loads(doctor.stdout)
             self.assertTrue(doctor_body["ok"], doctor_body)
+            bench = subprocess.run(cmd + ["bench", "--prompt-chars", "80,160", "--repeats", "1"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bench.returncode, 0, bench.stderr + bench.stdout)
+            bench_body = json.loads(bench.stdout)
+            self.assertTrue(bench_body["ok"], bench_body)
+            self.assertEqual(len(bench_body["runs"]), 2)
+            watchdog = subprocess.run(cmd + ["watchdog", "--max-swap-gib", "999999", "--duration", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(watchdog.returncode, 0, watchdog.stderr + watchdog.stdout)
+            watchdog_body = json.loads(watchdog.stdout)
+            self.assertTrue(watchdog_body["ok"], watchdog_body)
+            ingested = root / "ingested.toml"
+            ingest = subprocess.run([sys.executable, "-m", "modelctl.cli", "ingest", "--endpoint", f"http://127.0.0.1:{port}/v1", "--output", str(ingested)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(ingest.returncode, 0, ingest.stderr + ingest.stdout)
+            ingest_body = json.loads(ingest.stdout)
+            self.assertTrue(ingest_body["ok"], ingest_body)
+            self.assertEqual(load_manifest(ingested).model_id, "fake-model")
             stop = subprocess.run(cmd + ["stop"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(stop.returncode, 0, stop.stderr + stop.stdout)
     def test_registry_list_command(self):
