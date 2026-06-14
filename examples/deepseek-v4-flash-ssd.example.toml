@@ -1,0 +1,56 @@
+# Example only. Adjust paths for your machine.
+
+[model]
+id = "deepseek-v4-flash-ssd"
+model_id = "deepseek-v4-flash-ssd-4096"
+endpoint = "http://127.0.0.1:8127/v1"
+description = "Custom SSD-streaming DeepSeek V4 Flash lane"
+
+[start]
+command = ["bash", "-lc", "cd $HOME/LLM/ssd-streaming && exec ./run-dsv4-flash-ssd-server-candidate.sh"]
+cwd = "$HOME/LLM/ssd-streaming"
+log_path = "$HOME/.local/state/modelctl/deepseek-v4-flash-ssd.log"
+pid_path = "$HOME/.local/state/modelctl/deepseek-v4-flash-ssd.pid.json"
+startup_timeout_sec = 300
+readiness_url = "http://127.0.0.1:8127/v1/models"
+readiness_contains = "deepseek-v4-flash-ssd-4096"
+
+[start.env]
+DSV4_FLASH_ALIAS = "deepseek-v4-flash-ssd-4096"
+DSV4_FLASH_PORT = "8127"
+DSV4_FLASH_CTX = "4096"
+DSV4_FLASH_SLOT_BANK = "128"
+DSV4_FLASH_CACHE_IO_SPLIT = "8"
+DSV4_FLASH_THREADS = "12"
+DSV4_FLASH_THREADS_BATCH = "12"
+DSV4_FLASH_THREADS_HTTP = "4"
+LLAMA_FLASH_MOE_EXPERIMENTAL_PARALLEL_SLOT_READS = "1"
+LLAMA_FLASH_MOE_EXPERIMENTAL_BATCHED_INSTALL_READS = "1"
+
+[preflight]
+required_paths = [
+  "$HOME/LLM/ssd-streaming/run-dsv4-flash-ssd-server-candidate.sh",
+  "/Volumes/ModelSSD/Models/DeepSeek-V4-Flash-FP4-FP8-SSD",
+  "$HOME/LLM/ssd-secondary-sidecars/deepseek-v4-flash-fp4-fp8-sidecar",
+]
+exclusive_ports = [8127]
+max_swap_gib = 4
+
+[[preflight.disk]]
+path = "$HOME"
+min_free_gib = 50
+
+[[preflight.disk]]
+path = "/Volumes/ModelSSD"
+min_free_gib = 200
+
+[smoke]
+prompt = "Return exactly this JSON and nothing else: {\"ok\":true,\"lane\":\"ssd\"}"
+expect = "{\"ok\":true,\"lane\":\"ssd\"}"
+max_tokens = 96
+temperature = 0
+
+[[cleanup]]
+path = "$HOME/Library/Caches/ds4-kv"
+description = "Old DS4 KV cache; safe to recreate if DS4 is not active."
+safe = true

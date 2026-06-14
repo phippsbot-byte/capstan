@@ -1,0 +1,30 @@
+# Minimal llama.cpp-style OpenAI server example.
+
+[model]
+id = "llama-cpp-local"
+model_id = "local-model"
+endpoint = "http://127.0.0.1:8080/v1"
+description = "Generic llama-server model"
+
+[start]
+command = ["llama-server", "--model", "$HOME/models/model.gguf", "--host", "127.0.0.1", "--port", "8080", "--alias", "local-model"]
+log_path = "$HOME/.local/state/modelctl/llama-cpp-local.log"
+pid_path = "$HOME/.local/state/modelctl/llama-cpp-local.pid.json"
+startup_timeout_sec = 120
+readiness_url = "http://127.0.0.1:8080/v1/models"
+readiness_contains = "local-model"
+
+[preflight]
+required_paths = ["$HOME/models/model.gguf"]
+exclusive_ports = [8080]
+max_swap_gib = 2
+
+[[preflight.disk]]
+path = "$HOME"
+min_free_gib = 20
+
+[smoke]
+prompt = "Reply with exactly the word pong."
+expect = "pong"
+max_tokens = 16
+temperature = 0
