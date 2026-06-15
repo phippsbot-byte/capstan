@@ -34,7 +34,9 @@ required_paths = [
   "$HOME/LLM/ssd-secondary-sidecars/deepseek-v4-flash-fp4-fp8-sidecar",
 ]
 exclusive_ports = [8127]
-max_swap_gib = 4
+# Emergency absolute ceiling only. For always-on supervision, prefer:
+# modelctl -m this-file.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
+max_swap_gib = 48
 
 [[preflight.disk]]
 path = "$HOME"

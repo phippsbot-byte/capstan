@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.11.0/local_modelctl-0.11.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.12.0/local_modelctl-0.12.0-py3-none-any.whl
 ```
 
 For local development:
@@ -60,9 +60,9 @@ modelctl reports save --format json
 modelctl reports list
 modelctl doctor --fix
 modelctl health --max-swap-delta-gib 1 --sample-sec 5
-modelctl daemon --iterations 1 --max-swap-gib 4
-modelctl service install --restart --max-swap-gib 4 --interval 30 --dry-run
-modelctl service install --restart --max-swap-gib 4 --interval 30 --overwrite
+modelctl daemon --health-mode --iterations 1 --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5
+modelctl service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
+modelctl service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
 modelctl service start
 modelctl service status
 modelctl watchdog --max-swap-gib 4 --duration 0
@@ -141,8 +141,9 @@ safe = true
 - `soak --count N` — run repeated smoke tests with timing and swap sampling.
 - `bench --preset tiny|small|standard --output bench.md --format md` — run synthetic prompt-size benchmarks and write artifacts.
 - `watchdog --max-swap-gib N` — sample readiness/swap and optionally stop the manifest process on breach.
-- `daemon --max-swap-gib N [--restart]` — run a foreground supervisor loop; restart is explicit only.
-- `service install [--restart] [--dry-run]` — write a macOS LaunchAgent plist that runs `modelctl daemon` for this manifest.
+- `daemon --health-mode --max-swap-delta-gib N [--restart]` — run a foreground supervisor loop using structured health verdicts; restart is explicit only.
+- `daemon --max-swap-gib N [--restart]` — legacy watchdog-style supervisor loop.
+- `service install [--restart] [--health-mode] [--dry-run]` — write a macOS LaunchAgent plist that runs `modelctl daemon` for this manifest.
 - `service start/stop/restart/status/uninstall [--dry-run]` — control the LaunchAgent with `launchctl`; dry-run prints the exact commands.
 - `cleanup` — dry-run cleanup candidates.
 - `cleanup --execute` — delete only candidates marked `safe = true`.

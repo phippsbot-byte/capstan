@@ -152,6 +152,11 @@ def add_service_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p_install.add_argument("--label", default=None, help="launchd label; defaults to ai.modelctl.<manifest-id>")
     p_install.add_argument("--restart", action="store_true", help="Daemon may restart/start the model on breach; requires [start]")
     p_install.add_argument("--max-swap-gib", type=float, default=None, help="Override manifest preflight max_swap_gib for the daemon")
+    p_install.add_argument("--max-swap-delta-gib", type=float, default=None, help="Health-mode maximum allowed swap growth across --sample-sec")
+    p_install.add_argument("--sample-sec", type=float, default=0.0, help="Health-mode seconds between swap samples")
+    p_install.add_argument("--health-mode", action="store_true", help="Run the daemon with modelctl health verdicts instead of legacy watchdog samples")
+    p_install.add_argument("--smoke", action="store_true", help="Health-mode daemon includes manifest smoke test")
+    p_install.add_argument("--max-latency-sec", type=float, default=None, help="Health-mode maximum allowed smoke latency")
     p_install.add_argument("--interval", type=float, default=30.0, help="Daemon sample interval seconds")
     p_install.add_argument("--python", default=None, help="Python executable to run modelctl from; defaults to current interpreter")
     p_install.add_argument("--service-log", default=None, help="LaunchAgent stdout log path")
@@ -236,6 +241,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_watchdog.add_argument("--stop-on-breach", action="store_true")
     p_daemon = sub.add_parser("daemon", help="Run a foreground readiness/swap supervisor loop")
     p_daemon.add_argument("--max-swap-gib", type=float, default=None)
+    p_daemon.add_argument("--max-swap-delta-gib", type=float, default=None, help="Health-mode maximum allowed swap growth across --sample-sec")
+    p_daemon.add_argument("--sample-sec", type=float, default=0.0, help="Health-mode seconds between swap samples")
+    p_daemon.add_argument("--smoke", action="store_true", help="Health-mode: include manifest smoke test")
+    p_daemon.add_argument("--max-latency-sec", type=float, default=None, help="Health-mode maximum allowed smoke latency")
+    p_daemon.add_argument("--health-mode", action="store_true", help="Use modelctl health verdicts instead of legacy watchdog samples")
     p_daemon.add_argument("--interval", type=float, default=30.0, help="Seconds between supervisor samples")
     p_daemon.add_argument("--iterations", type=int, default=None, help="Stop after N samples; omit to run until interrupted")
     p_daemon.add_argument("--restart", action="store_true", help="On breach, stop/start the configured manifest process. Explicit for a reason.")
@@ -322,10 +332,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "watchdog":
             result = watchdog(manifest, max_swap_gib=args.max_swap_gib, duration_sec=args.duration, interval_sec=args.interval, stop_on_breach=args.stop_on_breach); emit(result); return 0 if result.get("ok") else 2
         if args.command == "daemon":
-            result = daemon(manifest, max_swap_gib=args.max_swap_gib, interval_sec=args.interval, iterations=args.iterations, restart=args.restart, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+            daemon_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec > 0 or args.smoke or args.max_latency_sec is not None)
+            result = daemon(manifest, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=daemon_health_mode, interval_sec=args.interval, iterations=args.iterations, restart=args.restart, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
         if args.command == "service":
             if args.service_command == "install":
-                result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+                service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec > 0 or args.smoke or args.max_latency_sec is not None)
+                result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
             result = service_action(manifest, args.service_command, label=args.label, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "cleanup":
             emit(cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)); return 0

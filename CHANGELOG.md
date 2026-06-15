@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.12.0
+
+- Add `daemon --health-mode` so long-running supervisors can use the structured health verdict instead of legacy watchdog-only sampling.
+- Add daemon/service flags for `--max-swap-delta-gib`, `--sample-sec`, `--smoke`, and `--max-latency-sec`.
+- Teach `service install` to persist health-mode daemon arguments into the generated LaunchAgent plist.
+
 ## v0.11.0
 
 - Add `modelctl health` for a single PID/readiness/swap health verdict.

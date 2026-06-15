@@ -49,9 +49,9 @@ modelctl -m modelctl.toml reports save --format json
 modelctl reports list
 modelctl -m modelctl.toml doctor --fix
 modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
-modelctl -m modelctl.toml daemon --iterations 1 --max-swap-gib 4
-modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --dry-run
-modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --overwrite
+modelctl -m modelctl.toml daemon --health-mode --iterations 1 --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5
+modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
+modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
 modelctl -m modelctl.toml service start
 modelctl -m modelctl.toml service status
 modelctl -m modelctl.toml watchdog --max-swap-gib 4 --duration 0
@@ -79,13 +79,13 @@ modelctl -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-g
 Use `--dry-run` first. It prints the plist path and daemon arguments without touching `~/Library/LaunchAgents`:
 
 ```bash
-modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --dry-run
+modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
 ```
 
 Then install and control it:
 
 ```bash
-modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --overwrite
+modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
 modelctl -m modelctl.toml service start
 modelctl -m modelctl.toml service status
 modelctl -m modelctl.toml service restart
@@ -94,6 +94,8 @@ modelctl -m modelctl.toml service uninstall
 ```
 
 `--restart` is explicit because it lets the daemon stop/start the model on readiness or swap breach. No sneaky self-healing time bombs.
+
+For huge macOS model lanes, prefer `--health-mode --max-swap-delta-gib ...` so stale absolute swap does not trigger a pointless restart loop. Keep `--max-swap-gib` as the emergency ceiling.
 
 For tests or custom service roots, set `MODELCTL_LAUNCHD_DIR`.
 

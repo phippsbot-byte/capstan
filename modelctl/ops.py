@@ -401,15 +401,42 @@ def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duratio
     return {"ok": not breached, "breached": breached, "max_swap_gib": max_swap_gib, "duration_sec": duration_sec, "interval_sec": interval_sec, "stop_on_breach": stop_on_breach, "stop_result": stop_result, "samples": samples}
 
 
-def daemon(manifest: ModelManifest, max_swap_gib: float | None = None, interval_sec: float = 30.0, iterations: int | None = None, restart: bool = False, wait: bool = True) -> dict[str, Any]:
+def daemon(
+    manifest: ModelManifest,
+    max_swap_gib: float | None = None,
+    interval_sec: float = 30.0,
+    iterations: int | None = None,
+    restart: bool = False,
+    wait: bool = True,
+    *,
+    max_swap_delta_gib: float | None = None,
+    sample_sec: float = 0.0,
+    include_smoke: bool = False,
+    max_latency_sec: float | None = None,
+    health_mode: bool = False,
+) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     index = 0
     ok = True
     while True:
         index += 1
-        sample = watchdog(manifest, max_swap_gib=max_swap_gib, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
-        first = sample["samples"][0] if sample.get("samples") else {}
-        breached = bool(sample.get("breached"))
+        if health_mode:
+            sample = health(
+                manifest,
+                max_swap_gib=max_swap_gib,
+                max_swap_delta_gib=max_swap_delta_gib,
+                sample_sec=sample_sec,
+                include_smoke=include_smoke,
+                max_latency_sec=max_latency_sec,
+            )
+            first = sample
+            breached = not bool(sample.get("ok"))
+            row_time = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        else:
+            sample = watchdog(manifest, max_swap_gib=max_swap_gib, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
+            first = sample["samples"][0] if sample.get("samples") else {}
+            breached = bool(sample.get("breached"))
+            row_time = first.get("time")
         action: dict[str, Any] | None = None
         if breached:
             ok = False
@@ -424,8 +451,8 @@ def daemon(manifest: ModelManifest, max_swap_gib: float | None = None, interval_
                     readiness = started.get("readiness") if isinstance(started, dict) else None
                     if isinstance(readiness, dict) and readiness.get("ready"):
                         ok = True
-        rows.append({"index": index, "time": first.get("time"), "breached": breached, "sample": first, "action": action})
+        rows.append({"index": index, "time": row_time, "breached": breached, "sample": first, "action": action})
         if iterations is not None and index >= iterations:
             break
         time.sleep(max(0.1, interval_sec))
-    return {"ok": ok, "iterations_requested": iterations, "iterations_completed": len(rows), "restart": restart, "max_swap_gib": max_swap_gib, "interval_sec": interval_sec, "iterations": rows}
+    return {"ok": ok, "iterations_requested": iterations, "iterations_completed": len(rows), "restart": restart, "health_mode": health_mode, "max_swap_gib": max_swap_gib, "max_swap_delta_gib": max_swap_delta_gib, "sample_sec": sample_sec, "include_smoke": include_smoke, "max_latency_sec": max_latency_sec, "interval_sec": interval_sec, "iterations": rows}
