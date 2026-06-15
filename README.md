@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.9.0/local_modelctl-0.9.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.10.0/local_modelctl-0.10.0-py3-none-any.whl
 ```
 
 For local development:
@@ -60,6 +60,10 @@ modelctl reports save --format json
 modelctl reports list
 modelctl doctor --fix
 modelctl daemon --iterations 1 --max-swap-gib 4
+modelctl service install --restart --max-swap-gib 4 --interval 30 --dry-run
+modelctl service install --restart --max-swap-gib 4 --interval 30 --overwrite
+modelctl service start
+modelctl service status
 modelctl watchdog --max-swap-gib 4 --duration 0
 modelctl status
 modelctl cleanup          # dry-run
@@ -136,6 +140,8 @@ safe = true
 - `bench --preset tiny|small|standard --output bench.md --format md` — run synthetic prompt-size benchmarks and write artifacts.
 - `watchdog --max-swap-gib N` — sample readiness/swap and optionally stop the manifest process on breach.
 - `daemon --max-swap-gib N [--restart]` — run a foreground supervisor loop; restart is explicit only.
+- `service install [--restart] [--dry-run]` — write a macOS LaunchAgent plist that runs `modelctl daemon` for this manifest.
+- `service start/stop/restart/status/uninstall [--dry-run]` — control the LaunchAgent with `launchctl`; dry-run prints the exact commands.
 - `cleanup` — dry-run cleanup candidates.
 - `cleanup --execute` — delete only candidates marked `safe = true`.
 - `cleanup --execute --force` — delete unsafe candidates too. Sharp knife; don't juggle it.
@@ -148,6 +154,7 @@ safe = true
 - Manifests are the source of truth.
 - Cleanup is dry-run first.
 - Start/stop must be reproducible.
+- launchd service install should be previewable with `--dry-run`; no invisible plist surgery.
 - Every promoted model needs a smoke test.
 - If a service manager wedges, make that visible instead of pretending the model is bad.
 
@@ -155,7 +162,7 @@ safe = true
 
 - Alpha CLI.
 - OpenAI-compatible smoke only for now.
-- Process supervision is simple PID/process-group management, not a full daemon supervisor.
+- Process supervision is simple PID/process-group management plus optional macOS `launchd` wrapper, not a cross-platform service manager.
 - TOML only; intentionally zero runtime dependencies.
 
 ## License

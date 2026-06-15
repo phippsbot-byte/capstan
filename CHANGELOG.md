@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.0
+
+- Add `modelctl service install` for macOS LaunchAgent plist generation around `modelctl daemon`.
+- Add `modelctl service start/stop/restart/status/uninstall` wrappers for `launchctl`, with `--dry-run` previews for safe automation and tests.
+- Add guarded daemon service options: explicit `--restart`, swap ceiling override, interval, log path, run-at-load, keepalive, and custom launchd label.
+- Keep service install side-effect safe by refusing plist overwrites unless `--overwrite` is passed.
+
 ## v0.9.0
 
 - Add `modelctl mlx discover` to find local MLX model directories.

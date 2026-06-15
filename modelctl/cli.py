@@ -14,11 +14,12 @@ from .registry import add_registry, list_registry, remove_registry, show_registr
 from .report import write_report
 from .report_store import list_reports, save_report, show_report
 from .runner import start, stop, wait_ready
+from .service import ServiceError, install_service, service_action
 from . import __version__
 
 PRETTY = False
 
-MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup"}
+MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service"}
 BENCH_PRESETS = {
     "tiny": [128],
     "small": [128, 512, 1024],
@@ -144,6 +145,27 @@ def add_mlx_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p_manifest.add_argument("--overwrite", action="store_true")
 
 
+def add_service_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p_service = sub.add_parser("service", help="Install and control a macOS launchd service for this manifest")
+    svc = p_service.add_subparsers(dest="service_command", required=True)
+    p_install = svc.add_parser("install", help="Write a LaunchAgent plist that runs modelctl daemon")
+    p_install.add_argument("--label", default=None, help="launchd label; defaults to ai.modelctl.<manifest-id>")
+    p_install.add_argument("--restart", action="store_true", help="Daemon may restart/start the model on breach; requires [start]")
+    p_install.add_argument("--max-swap-gib", type=float, default=None, help="Override manifest preflight max_swap_gib for the daemon")
+    p_install.add_argument("--interval", type=float, default=30.0, help="Daemon sample interval seconds")
+    p_install.add_argument("--python", default=None, help="Python executable to run modelctl from; defaults to current interpreter")
+    p_install.add_argument("--service-log", default=None, help="LaunchAgent stdout log path")
+    p_install.add_argument("--run-at-load", action="store_true", help="Start daemon when launchd loads the plist")
+    p_install.add_argument("--no-keepalive", action="store_true", help="Do not ask launchd to keep the daemon alive")
+    p_install.add_argument("--no-wait", action="store_true", help="Pass --no-wait to daemon restarts")
+    p_install.add_argument("--overwrite", action="store_true")
+    p_install.add_argument("--dry-run", action="store_true")
+    for name in ("start", "stop", "restart", "status", "uninstall"):
+        p = svc.add_parser(name, help=f"{name} the launchd service")
+        p.add_argument("--label", default=None)
+        p.add_argument("--dry-run", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modelctl", description="Manifest-driven lifecycle control for local LLM servers.")
     parser.add_argument("-m", "--manifest", default="modelctl.toml", help="Path to model manifest TOML")
@@ -165,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_registry_parser(sub)
     add_reports_parser(sub)
     add_mlx_parser(sub)
+    add_service_parser(sub)
     p_ingest = sub.add_parser("ingest", help="Generate a starter manifest from an OpenAI-compatible /v1 endpoint")
     p_ingest.add_argument("--endpoint", required=True, help="Endpoint base URL, e.g. http://127.0.0.1:8080/v1")
     p_ingest.add_argument("--output", "-o", default=None, help="Write manifest to this path; omit to print manifest JSON payload")
@@ -292,10 +315,16 @@ def main(argv: list[str] | None = None) -> int:
             result = watchdog(manifest, max_swap_gib=args.max_swap_gib, duration_sec=args.duration, interval_sec=args.interval, stop_on_breach=args.stop_on_breach); emit(result); return 0 if result.get("ok") else 2
         if args.command == "daemon":
             result = daemon(manifest, max_swap_gib=args.max_swap_gib, interval_sec=args.interval, iterations=args.iterations, restart=args.restart, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+        if args.command == "service":
+            if args.service_command == "install":
+                result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+            result = service_action(manifest, args.service_command, label=args.label, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "cleanup":
             emit(cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)); return 0
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr); return 2
+    except ServiceError as exc:
+        print(f"service error: {exc}", file=sys.stderr); return 2
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr); return 130
     except Exception as exc:

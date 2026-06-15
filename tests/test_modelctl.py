@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
+import plistlib
 import socket
 import subprocess
 import sys
@@ -281,6 +282,86 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(pretty.returncode, 0, pretty.stderr + pretty.stdout)
             self.assertIn("id: repair", pretty.stdout)
             self.assertNotIn('{', pretty.stdout)
+
+    def test_service_launchd_install_preview_and_dry_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            launchd = root / "LaunchAgents"
+            manifest_path = self.write_manifest(root, f'''
+                [model]
+                id = "Fake Model"
+                model_id = "fake-model"
+                endpoint = "http://127.0.0.1:9191/v1"
+
+                [start]
+                command = ["{sys.executable}", "-c", "import time; time.sleep(60)"]
+                cwd = "{root}"
+                startup_timeout_sec = 5
+                readiness_url = "http://127.0.0.1:9191/v1/models"
+                readiness_contains = "fake-model"
+
+                [preflight]
+                exclusive_ports = [9191]
+                max_swap_gib = 8
+            ''')
+            env = os.environ.copy()
+            env["MODELCTL_LAUNCHD_DIR"] = str(launchd)
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
+
+            bad_label = subprocess.run(cmd + ["service", "install", "--dry-run", "--label", "../escape"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_label.returncode, 2, bad_label.stderr + bad_label.stdout)
+            self.assertIn("service error", bad_label.stderr)
+            self.assertFalse((root / "escape.plist").exists())
+
+            preview = subprocess.run(cmd + ["service", "install", "--dry-run", "--restart", "--max-swap-gib", "4", "--interval", "5"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(preview.returncode, 0, preview.stderr + preview.stdout)
+            preview_body = json.loads(preview.stdout)
+            self.assertTrue(preview_body["ok"], preview_body)
+            self.assertFalse(preview_body["written"], preview_body)
+            self.assertEqual(preview_body["label"], "ai.modelctl.fake-model")
+            self.assertIn("daemon", preview_body["program_arguments"])
+            self.assertIn("--restart", preview_body["program_arguments"])
+            self.assertIn("--max-swap-gib", preview_body["program_arguments"])
+            self.assertFalse(launchd.exists(), "dry-run must not create LaunchAgents")
+
+            installed = subprocess.run(cmd + ["service", "install", "--restart", "--max-swap-gib", "4", "--interval", "5"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(installed.returncode, 0, installed.stderr + installed.stdout)
+            installed_body = json.loads(installed.stdout)
+            self.assertTrue(installed_body["ok"], installed_body)
+            self.assertTrue(installed_body["written"], installed_body)
+            plist_path = Path(installed_body["plist_path"])
+            self.assertTrue(plist_path.exists())
+            plist = plistlib.loads(plist_path.read_bytes())
+            self.assertEqual(plist["Label"], "ai.modelctl.fake-model")
+            self.assertTrue(plist["KeepAlive"])
+            self.assertFalse(plist["RunAtLoad"])
+            self.assertIn(str(manifest_path.resolve()), plist["ProgramArguments"])
+            self.assertIn("daemon", plist["ProgramArguments"])
+            self.assertIn("--restart", plist["ProgramArguments"])
+            self.assertIn("--max-swap-gib", plist["ProgramArguments"])
+            self.assertIn("MODELCTL_MANIFEST", plist["EnvironmentVariables"])
+
+            duplicate = subprocess.run(cmd + ["service", "install"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(duplicate.returncode, 2, duplicate.stderr + duplicate.stdout)
+
+            status = subprocess.run(cmd + ["service", "status", "--dry-run"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(status.returncode, 0, status.stderr + status.stdout)
+            status_body = json.loads(status.stdout)
+            self.assertTrue(status_body["ok"], status_body)
+            self.assertEqual(status_body["action"], "status")
+            self.assertIn("launchctl", status_body["commands"][0])
+            self.assertIn("print", status_body["commands"][0])
+
+            start = subprocess.run(cmd + ["service", "start", "--dry-run"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(start.returncode, 0, start.stderr + start.stdout)
+            start_body = json.loads(start.stdout)
+            self.assertEqual(start_body["action"], "start")
+            self.assertTrue(any("bootstrap" in command for command in start_body["commands"]))
+            self.assertTrue(any("kickstart" in command for command in start_body["commands"]))
+
+            uninstall = subprocess.run(cmd + ["service", "uninstall", "--dry-run"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(uninstall.returncode, 0, uninstall.stderr + uninstall.stdout)
+            self.assertTrue(plist_path.exists(), "dry-run uninstall must not remove plist")
 
     def test_mlx_discover_inspect_overlay_and_manifest(self):
         with tempfile.TemporaryDirectory() as td:

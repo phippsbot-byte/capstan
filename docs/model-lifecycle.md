@@ -10,6 +10,7 @@ A model is not "installed" until all of this is true:
 6. Smoke test passes.
 7. Cleanup candidates are documented.
 8. Stop/restart works.
+9. Optional service wrapper is installed and controllable.
 
 ## Artifact classes
 
@@ -38,19 +39,48 @@ modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --ove
 
 modelctl registry add --source modelctl.toml --name local-test
 modelctl registry use local-test --output modelctl.toml --overwrite
-modelctl preflight -m modelctl.toml
-modelctl start -m modelctl.toml --wait
-modelctl smoke -m modelctl.toml
-modelctl soak -m modelctl.toml --count 3
-modelctl bench -m modelctl.toml --preset tiny --output bench.md --format md
-modelctl report -m modelctl.toml --format md --output report.md
+modelctl -m modelctl.toml preflight
+modelctl -m modelctl.toml start --wait
+modelctl -m modelctl.toml smoke
+modelctl -m modelctl.toml soak --count 3
+modelctl -m modelctl.toml bench --preset tiny --output bench.md --format md
+modelctl -m modelctl.toml report --format md --output report.md
 modelctl -m modelctl.toml reports save --format json
 modelctl reports list
-modelctl doctor -m modelctl.toml --fix
-modelctl daemon -m modelctl.toml --iterations 1 --max-swap-gib 4
-modelctl watchdog -m modelctl.toml --max-swap-gib 4 --duration 0
-modelctl status -m modelctl.toml
+modelctl -m modelctl.toml doctor --fix
+modelctl -m modelctl.toml daemon --iterations 1 --max-swap-gib 4
+modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --dry-run
+modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --overwrite
+modelctl -m modelctl.toml service start
+modelctl -m modelctl.toml service status
+modelctl -m modelctl.toml watchdog --max-swap-gib 4 --duration 0
+modelctl -m modelctl.toml status
 ```
+
+## macOS service wrapper
+
+`modelctl service install` writes a LaunchAgent plist for the manifest. The plist runs `modelctl daemon`, not the model server directly; that keeps the control plane in one place.
+
+Use `--dry-run` first. It prints the plist path and daemon arguments without touching `~/Library/LaunchAgents`:
+
+```bash
+modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --dry-run
+```
+
+Then install and control it:
+
+```bash
+modelctl -m modelctl.toml service install --restart --max-swap-gib 4 --interval 30 --overwrite
+modelctl -m modelctl.toml service start
+modelctl -m modelctl.toml service status
+modelctl -m modelctl.toml service restart
+modelctl -m modelctl.toml service stop
+modelctl -m modelctl.toml service uninstall
+```
+
+`--restart` is explicit because it lets the daemon stop/start the model on readiness or swap breach. No sneaky self-healing time bombs.
+
+For tests or custom service roots, set `MODELCTL_LAUNCHD_DIR`.
 
 For bigger models, add a soak outside this CLI for now:
 
