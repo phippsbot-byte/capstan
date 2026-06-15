@@ -37,7 +37,9 @@ modelctl smoke -m modelctl.toml
 modelctl soak -m modelctl.toml --count 3
 modelctl bench -m modelctl.toml --preset tiny --output bench.md --format md
 modelctl report -m modelctl.toml --format md --output report.md
-modelctl doctor -m modelctl.toml
+modelctl -m modelctl.toml reports save --format json
+modelctl reports list
+modelctl doctor -m modelctl.toml --fix
 modelctl watchdog -m modelctl.toml --max-swap-gib 4 --duration 0
 modelctl status -m modelctl.toml
 ```

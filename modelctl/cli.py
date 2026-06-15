@@ -8,11 +8,14 @@ from .bench_artifacts import write_bench_artifact
 from .init import init_manifest
 from .ingest import ingest
 from .manifest import ManifestError, load_manifest
-from .ops import bench, cleanup_execute, cleanup_plan, doctor, preflight, smoke, soak, status, validate, watchdog
+from .ops import bench, cleanup_execute, cleanup_plan, doctor, doctor_fix, preflight, smoke, soak, status, validate, watchdog
 from .registry import add_registry, list_registry, remove_registry, show_registry, use_registry
 from .report import write_report
+from .report_store import list_reports, save_report, show_report
 from .runner import start, stop, wait_ready
 from . import __version__
+
+PRETTY = False
 
 MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "smoke", "soak", "bench", "doctor", "watchdog", "report", "cleanup"}
 BENCH_PRESETS = {
@@ -22,8 +25,46 @@ BENCH_PRESETS = {
 }
 
 
+def _pretty_value(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return str(value)
+    return json.dumps(value, sort_keys=True)
+
+
+def _pretty_lines(obj, indent: int = 0) -> list[str]:
+    pad = "  " * indent
+    if isinstance(obj, dict):
+        lines: list[str] = []
+        for key, value in obj.items():
+            if isinstance(value, dict):
+                lines.append(f"{pad}{key}:")
+                lines.extend(_pretty_lines(value, indent + 1))
+            elif isinstance(value, list):
+                if not value:
+                    lines.append(f"{pad}{key}: []")
+                else:
+                    lines.append(f"{pad}{key}:")
+                    for item in value:
+                        if isinstance(item, (dict, list)):
+                            lines.append(f"{pad}  -")
+                            lines.extend(_pretty_lines(item, indent + 2))
+                        else:
+                            lines.append(f"{pad}  - {_pretty_value(item)}")
+            else:
+                lines.append(f"{pad}{key}: {_pretty_value(value)}")
+        return lines
+    return [f"{pad}{_pretty_value(obj)}"]
+
+
 def emit(obj) -> None:
-    print(json.dumps(obj, indent=2, sort_keys=True))
+    if PRETTY:
+        print("\n".join(_pretty_lines(obj)))
+    else:
+        print(json.dumps(obj, indent=2, sort_keys=True))
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -64,9 +105,22 @@ def add_registry_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     p_reg_use.add_argument("--symlink", action="store_true")
 
 
+def add_reports_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p_reports = sub.add_parser("reports", help="Manage saved model reports")
+    reps = p_reports.add_subparsers(dest="reports_command", required=True)
+    p_save = reps.add_parser("save", help="Save a model report under the modelctl state directory")
+    p_save.add_argument("--format", choices=["json", "md"], default="json")
+    p_save.add_argument("--include-smoke", action="store_true")
+    p_list = reps.add_parser("list", help="List saved reports")
+    p_list.add_argument("--model", default=None, help="Filter by manifest id")
+    p_show = reps.add_parser("show", help="Show a saved report by report id or path")
+    p_show.add_argument("report_id")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modelctl", description="Manifest-driven lifecycle control for local LLM servers.")
     parser.add_argument("-m", "--manifest", default="modelctl.toml", help="Path to model manifest TOML")
+    parser.add_argument("--pretty", action="store_true", help="Print human-readable output instead of JSON")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("version", help="Print modelctl version")
     p_init = sub.add_parser("init", help="Write a starter modelctl.toml manifest")
@@ -82,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = sub.add_parser("list", help="List manifests in registry directories")
     p_list.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     add_registry_parser(sub)
+    add_reports_parser(sub)
     p_ingest = sub.add_parser("ingest", help="Generate a starter manifest from an OpenAI-compatible /v1 endpoint")
     p_ingest.add_argument("--endpoint", required=True, help="Endpoint base URL, e.g. http://127.0.0.1:8080/v1")
     p_ingest.add_argument("--output", "-o", default=None, help="Write manifest to this path; omit to print manifest JSON payload")
@@ -95,7 +150,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop = sub.add_parser("stop", help="Stop configured model server")
     p_stop.add_argument("--timeout", type=int, default=10, help="Grace period before SIGKILL")
     sub.add_parser("status", help="Print process/readiness status")
-    sub.add_parser("doctor", help="Run preflight, status, cleanup review, and stale-state diagnostics")
+    p_doctor = sub.add_parser("doctor", help="Run preflight, status, cleanup review, and stale-state diagnostics")
+    p_doctor.add_argument("--fix", action="store_true", help="Apply safe local repairs such as stale PID removal and state-dir creation")
     p_report = sub.add_parser("report", help="Write a JSON or markdown model state report")
     p_report.add_argument("--output", "-o", default=None)
     p_report.add_argument("--format", choices=["json", "md"], default="json")
@@ -128,8 +184,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global PRETTY
     parser = build_parser()
     args = parser.parse_args(argv)
+    PRETTY = bool(args.pretty)
     try:
         if args.command == "version":
             emit({"version": __version__}); return 0
@@ -148,6 +206,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = remove_registry(args.name, registry_dir=args.registry, missing_ok=args.missing_ok); emit(result); return 0 if result.get("ok") else 2
             if args.registry_command == "use":
                 result = use_registry(args.name, output=args.output, registry_dir=args.registry, overwrite=args.overwrite, symlink=args.symlink); emit(result); return 0 if result.get("ok") else 2
+        if args.command == "reports":
+            if args.reports_command == "list":
+                result = list_reports(model=args.model); emit(result); return 0 if result.get("ok") else 2
+            if args.reports_command == "show":
+                result = show_report(args.report_id); emit(result); return 0 if result.get("ok") else 2
+            if args.reports_command == "save":
+                manifest = load_manifest(args.manifest)
+                result = save_report(manifest, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
         if args.command == "ingest":
             result = ingest(args.endpoint, output=args.output, model_id=args.model_id, ident=args.ident, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
         if args.command not in MANIFEST_COMMANDS:
@@ -166,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             emit(status(manifest)); return 0
         if args.command == "doctor":
-            result = doctor(manifest); emit(result); return 0 if result.get("ok") else 2
+            result = doctor_fix(manifest) if args.fix else doctor(manifest); emit(result); return 0 if result.get("ok") else 2
         if args.command == "report":
             result = write_report(manifest, output=args.output, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
         if args.command == "smoke":

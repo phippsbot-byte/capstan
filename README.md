@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.6.0/local_modelctl-0.6.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.7.0/local_modelctl-0.7.0-py3-none-any.whl
 ```
 
 For local development:
@@ -39,7 +39,7 @@ $EDITOR modelctl.toml
 # Option C: ingest a running OpenAI-compatible endpoint.
 modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 
-modelctl validate
+modelctl --pretty validate
 modelctl registry add --source modelctl.toml --name my-model
 modelctl registry use my-model --output modelctl.toml --overwrite
 modelctl registry list
@@ -49,7 +49,9 @@ modelctl smoke
 modelctl soak --count 3
 modelctl bench --preset tiny --output bench.md --format md
 modelctl report --format md --output report.md
-modelctl doctor
+modelctl reports save --format json
+modelctl reports list
+modelctl doctor --fix
 modelctl watchdog --max-swap-gib 4 --duration 0
 modelctl status
 modelctl cleanup          # dry-run
@@ -106,7 +108,7 @@ safe = true
 
 - `version` — print installed modelctl version.
 - `init --template minimal|llama-cpp --output modelctl.toml` — generate a starter manifest.
-- `validate` — parse manifest and print resolved summary.
+- `validate` — parse manifest and print resolved summary; use global `--pretty` for human output.
 - `ingest --endpoint URL --output modelctl.toml` — generate a starter manifest from a running `/v1/models` endpoint.
 - `list` — convenience alias for `registry list`; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.
 - `registry add/list/show/remove/use` — manage durable manifest registry entries and materialize a registered manifest into a workspace.
@@ -114,8 +116,9 @@ safe = true
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
-- `doctor` — run preflight/status/cleanup review and report stale PID/log/endpoint issues.
+- `doctor --fix` — run diagnostics and apply safe local repairs like stale PID-state removal and state-dir creation.
 - `report --format md --output report.md` — write JSON/Markdown model state reports.
+- `reports save/list/show` — keep/query saved report history under the modelctl state directory.
 - `smoke` — run OpenAI-compatible `/chat/completions` exact-output smoke.
 - `soak --count N` — run repeated smoke tests with timing and swap sampling.
 - `bench --preset tiny|small|standard --output bench.md --format md` — run synthetic prompt-size benchmarks and write artifacts.

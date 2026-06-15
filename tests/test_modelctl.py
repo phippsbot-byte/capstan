@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -179,6 +180,21 @@ class ModelCtlTests(unittest.TestCase):
             self.assertTrue(report_path.exists())
             report_body = json.loads(report_path.read_text())
             self.assertTrue(report_body["ok"], report_body)
+            env = os.environ.copy()
+            env["XDG_STATE_HOME"] = str(root / "state")
+            saved_report = subprocess.run(cmd + ["reports", "save", "--format", "json"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(saved_report.returncode, 0, saved_report.stderr + saved_report.stdout)
+            saved_body = json.loads(saved_report.stdout)
+            self.assertTrue(saved_body["ok"], saved_body)
+            self.assertTrue(Path(saved_body["path"]).exists())
+            reports_list = subprocess.run([sys.executable, "-m", "modelctl.cli", "reports", "list"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(reports_list.returncode, 0, reports_list.stderr + reports_list.stdout)
+            reports_body = json.loads(reports_list.stdout)
+            self.assertEqual(reports_body["count"], 1)
+            reports_show = subprocess.run([sys.executable, "-m", "modelctl.cli", "reports", "show", saved_body["report_id"]], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(reports_show.returncode, 0, reports_show.stderr + reports_show.stdout)
+            reports_show_body = json.loads(reports_show.stdout)
+            self.assertEqual(reports_show_body["report"]["model"]["id"], "fake")
             ingested = root / "ingested.toml"
             ingest = subprocess.run([sys.executable, "-m", "modelctl.cli", "ingest", "--endpoint", f"http://127.0.0.1:{port}/v1", "--output", str(ingested)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(ingest.returncode, 0, ingest.stderr + ingest.stdout)
@@ -225,6 +241,41 @@ class ModelCtlTests(unittest.TestCase):
             rm = subprocess.run([sys.executable, "-m", "modelctl.cli", "registry", "remove", "managed-model", "--registry", str(managed)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(rm.returncode, 0, rm.stderr + rm.stdout)
             self.assertFalse((managed / "managed-model.toml").exists())
+    def test_doctor_fix_and_pretty_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pid_path = root / "state" / "stale.pid.json"
+            log_path = root / "logs" / "model.log"
+            manifest_path = self.write_manifest(root, f'''
+                [model]
+                id = "repair"
+                model_id = "repair-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [start]
+                command = ["{sys.executable}", "-c", "import time; time.sleep(60)"]
+                cwd = "{root}"
+                log_path = "{log_path}"
+                pid_path = "{pid_path}"
+                startup_timeout_sec = 1
+                readiness_url = "http://127.0.0.1:9/v1/models"
+                readiness_contains = "repair-model"
+            ''')
+            pid_path.parent.mkdir(parents=True)
+            pid_path.write_text(json.dumps({"pid": 999999, "started_at": "old"}), encoding="utf-8")
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
+            fix = subprocess.run(cmd + ["doctor", "--fix"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(fix.returncode, 0, fix.stderr + fix.stdout)
+            fix_body = json.loads(fix.stdout)
+            self.assertTrue(fix_body["ok"], fix_body)
+            self.assertFalse(pid_path.exists())
+            self.assertIn("stale_pid_state_removed", [item["code"] for item in fix_body["fixes"]])
+            self.assertTrue(log_path.parent.exists())
+            pretty = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "-m", str(manifest_path), "validate"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(pretty.returncode, 0, pretty.stderr + pretty.stdout)
+            self.assertIn("id: repair", pretty.stdout)
+            self.assertNotIn('{', pretty.stdout)
+
     def test_init_and_version_commands(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

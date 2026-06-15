@@ -196,6 +196,30 @@ def doctor(manifest: ModelManifest) -> dict[str, Any]:
     }
 
 
+def doctor_fix(manifest: ModelManifest) -> dict[str, Any]:
+    fixes: list[dict[str, Any]] = []
+    pid_path = default_pid_path(manifest)
+    pid_state = read_pid_state(manifest)
+    if pid_path.exists() and pid_state is None:
+        pid_path.unlink()
+        fixes.append({"code": "invalid_pid_state_removed", "path": str(pid_path)})
+    elif pid_state and active_pid(manifest) is None:
+        pid_path.unlink()
+        fixes.append({"code": "stale_pid_state_removed", "path": str(pid_path), "pid_state": pid_state})
+
+    if manifest.start:
+        for code, path in (("pid_dir_created", default_pid_path(manifest).parent), ("log_dir_created", default_log_path(manifest).parent)):
+            existed = path.exists()
+            path.mkdir(parents=True, exist_ok=True)
+            if not existed:
+                fixes.append({"code": code, "path": str(path)})
+
+    result = doctor(manifest)
+    result["fixes"] = fixes
+    result["fixed"] = bool(fixes)
+    return result
+
+
 def _synthetic_prompt(prompt_chars: int) -> str:
     prefix = "Read the filler text, then reply exactly BENCH_OK.\n\nFILLER:\n"
     suffix = "\n\nReply exactly BENCH_OK."

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.0
+
+- Add `modelctl doctor --fix` for safe local repairs: stale/invalid PID-state removal and state directory creation.
+- Add saved report history via `modelctl reports save/list/show` under the modelctl state directory.
+- Add global `--pretty` output for human-readable command summaries while keeping JSON as the default.
+
 ## v0.6.0
 
 - Add tag-based GitHub Actions release automation that builds wheel/sdist, verifies the wheel, and uploads assets to the GitHub release.
