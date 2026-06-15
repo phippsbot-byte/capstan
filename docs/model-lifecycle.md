@@ -24,9 +24,16 @@ A model is not "installed" until all of this is true:
 Minimum useful gate:
 
 ```bash
-# Create modelctl.toml one of two ways:
+# Create modelctl.toml one of three ways:
 modelctl init --template llama-cpp --model-id local-model --output modelctl.toml --overwrite
-# or, if the endpoint is already running:
+
+# Or, for MLX artifacts, inspect and promote the served overlay:
+modelctl mlx discover --root ~/.cache/mlx-models
+modelctl mlx inspect ~/.cache/mlx-models/my-qwen-model
+modelctl mlx overlay ~/.cache/mlx-models/my-qwen-model
+modelctl mlx manifest ~/.cache/mlx-models/my-qwen-model-served --id my-qwen-model-served --port 8123 --output modelctl.toml --overwrite
+
+# Or, if the endpoint is already running:
 modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 
 modelctl registry add --source modelctl.toml --name local-test

@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.8.0/local_modelctl-0.8.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.9.0/local_modelctl-0.9.0-py3-none-any.whl
 ```
 
 For local development:
@@ -32,11 +32,18 @@ modelctl version
 modelctl init --template llama-cpp --model-id local-model --output modelctl.toml
 $EDITOR modelctl.toml
 
-# Option B: start from an example.
-cp examples/llama-cpp.example.toml modelctl.toml
+# Option B: build from an MLX artifact.
+modelctl mlx discover --root ~/.cache/mlx-models
+modelctl mlx inspect ~/.cache/mlx-models/my-qwen-model
+modelctl mlx overlay ~/.cache/mlx-models/my-qwen-model
+modelctl mlx manifest ~/.cache/mlx-models/my-qwen-model-served --id my-qwen-model-served --port 8123 --output modelctl.toml --overwrite
+
+# Option C: start from an example.
+cp examples/mlx-lm.example.toml modelctl.toml       # MLX
+# cp examples/llama-cpp.example.toml modelctl.toml  # llama.cpp
 $EDITOR modelctl.toml
 
-# Option C: ingest a running OpenAI-compatible endpoint.
+# Option D: ingest a running OpenAI-compatible endpoint.
 modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 
 modelctl --pretty validate
@@ -111,6 +118,10 @@ safe = true
 - `init --template minimal|llama-cpp --output modelctl.toml` — generate a starter manifest.
 - `validate` — parse manifest and print resolved summary; use global `--pretty` for human output.
 - `ingest --endpoint URL --output modelctl.toml` — generate a starter manifest from a running `/v1/models` endpoint.
+- `mlx discover --root ~/.cache/mlx-models` — find local MLX model directories.
+- `mlx inspect PATH` — inspect config/chat template and flag serving hazards like Qwen/Qwopus `<think>` preambles.
+- `mlx overlay PATH` — create a reversible sibling `-served` overlay that symlinks weights and patches only `chat_template.jinja`.
+- `mlx manifest PATH --id NAME --port N --output modelctl.toml` — generate an MLX-focused manifest using `python -m mlx_lm server`; stock MLX request model defaults to `default_model`.
 - `list` — convenience alias for `registry list`; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.
 - `registry add/list/show/remove/use` — manage durable manifest registry entries and materialize a registered manifest into a workspace.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
@@ -132,7 +143,8 @@ safe = true
 
 ## Design rules
 
-- No model-specific code in the CLI.
+- Generic lifecycle stays manifest-driven; substrate-specific helpers can generate better manifests.
+- MLX/Qwen chat-template fixes must be reversible overlays, not source artifact mutation.
 - Manifests are the source of truth.
 - Cleanup is dry-run first.
 - Start/stop must be reproducible.

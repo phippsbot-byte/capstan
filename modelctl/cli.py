@@ -8,6 +8,7 @@ from .bench_artifacts import write_bench_artifact
 from .init import init_manifest
 from .ingest import ingest
 from .manifest import ManifestError, load_manifest
+from .mlx import create_overlay, discover_mlx_models, inspect_mlx_model, write_mlx_manifest
 from .ops import bench, cleanup_execute, cleanup_plan, daemon, doctor, doctor_fix, preflight, smoke, soak, status, validate, watchdog
 from .registry import add_registry, list_registry, remove_registry, show_registry, use_registry
 from .report import write_report
@@ -117,6 +118,32 @@ def add_reports_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p_show.add_argument("report_id")
 
 
+def add_mlx_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p_mlx = sub.add_parser("mlx", help="MLX model discovery, inspection, overlays, and manifests")
+    mlx = p_mlx.add_subparsers(dest="mlx_command", required=True)
+    p_discover = mlx.add_parser("discover", help="Find MLX model directories under a root")
+    p_discover.add_argument("--root", default="~/.cache/mlx-models", help="Root to scan for config.json files")
+    p_discover.add_argument("--limit", type=int, default=200)
+    p_inspect = mlx.add_parser("inspect", help="Inspect an MLX model directory for serving hazards")
+    p_inspect.add_argument("model_path")
+    p_overlay = mlx.add_parser("overlay", help="Create a reversible -served overlay with patched chat_template.jinja")
+    p_overlay.add_argument("model_path")
+    p_overlay.add_argument("--output", "-o", default=None, help="Overlay directory; defaults to sibling NAME-served")
+    p_overlay.add_argument("--overwrite", action="store_true")
+    p_manifest = mlx.add_parser("manifest", help="Generate a modelctl.toml for mlx_lm server")
+    p_manifest.add_argument("model_path")
+    p_manifest.add_argument("--output", "-o", default="modelctl.toml")
+    p_manifest.add_argument("--model-id", default=None, help="Request model id for stock mlx_lm; defaults to default_model. Use --id for friendly names.")
+    p_manifest.add_argument("--id", dest="ident", default=None)
+    p_manifest.add_argument("--port", type=int, default=8080)
+    p_manifest.add_argument("--python", default=None, help="Python executable with mlx_lm installed")
+    p_manifest.add_argument("--max-tokens", type=int, default=4096)
+    p_manifest.add_argument("--temp", type=float, default=0.23)
+    p_manifest.add_argument("--top-p", type=float, default=0.9)
+    p_manifest.add_argument("--prompt-cache-gib", type=float, default=4.0)
+    p_manifest.add_argument("--overwrite", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modelctl", description="Manifest-driven lifecycle control for local LLM servers.")
     parser.add_argument("-m", "--manifest", default="modelctl.toml", help="Path to model manifest TOML")
@@ -137,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     add_registry_parser(sub)
     add_reports_parser(sub)
+    add_mlx_parser(sub)
     p_ingest = sub.add_parser("ingest", help="Generate a starter manifest from an OpenAI-compatible /v1 endpoint")
     p_ingest.add_argument("--endpoint", required=True, help="Endpoint base URL, e.g. http://127.0.0.1:8080/v1")
     p_ingest.add_argument("--output", "-o", default=None, help="Write manifest to this path; omit to print manifest JSON payload")
@@ -220,6 +248,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.reports_command == "save":
                 manifest = load_manifest(args.manifest)
                 result = save_report(manifest, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
+        if args.command == "mlx":
+            if args.mlx_command == "discover":
+                result = discover_mlx_models(root=args.root, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
+            if args.mlx_command == "inspect":
+                result = inspect_mlx_model(args.model_path); emit(result); return 0 if result.get("ok") else 2
+            if args.mlx_command == "overlay":
+                result = create_overlay(args.model_path, output=args.output, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
+            if args.mlx_command == "manifest":
+                result = write_mlx_manifest(args.model_path, output=args.output, overwrite=args.overwrite, model_id=args.model_id, ident=args.ident, port=args.port, python=args.python, max_tokens=args.max_tokens, temp=args.temp, top_p=args.top_p, prompt_cache_gib=args.prompt_cache_gib); emit(result); return 0 if result.get("ok") else 2
         if args.command == "ingest":
             result = ingest(args.endpoint, output=args.output, model_id=args.model_id, ident=args.ident, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
         if args.command not in MANIFEST_COMMANDS:

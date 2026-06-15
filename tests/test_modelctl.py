@@ -282,6 +282,89 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("id: repair", pretty.stdout)
             self.assertNotIn('{', pretty.stdout)
 
+    def test_mlx_discover_inspect_overlay_and_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            model = root / "Qwen-Test-MLX"
+            model.mkdir()
+            (model / "config.json").write_text(json.dumps({"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"], "quantization": {"bits": 4}}), encoding="utf-8")
+            (model / "tokenizer_config.json").write_text(json.dumps({"chat_template": "external"}), encoding="utf-8")
+            (model / "weights.safetensors").write_text("fake", encoding="utf-8")
+            (model / "chat_template.jinja").write_text(textwrap.dedent('''
+                {% for message in messages %}
+                {{ message['content'] }}
+                {% endfor %}
+                {% if add_generation_prompt %}
+                {{- '<|im_start|>assistant\\n<think>\\n' }}
+                {% endif %}
+            '''), encoding="utf-8")
+            cmd = [sys.executable, "-m", "modelctl.cli", "mlx"]
+            discovered = subprocess.run(cmd + ["discover", "--root", str(root)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(discovered.returncode, 0, discovered.stderr + discovered.stdout)
+            discovered_body = json.loads(discovered.stdout)
+            self.assertEqual(discovered_body["count"], 1)
+            self.assertEqual(discovered_body["models"][0]["name"], "Qwen-Test-MLX")
+            inspected = subprocess.run(cmd + ["inspect", str(model)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(inspected.returncode, 0, inspected.stderr + inspected.stdout)
+            inspected_body = json.loads(inspected.stdout)
+            self.assertTrue(inspected_body["template"]["bad_think_preamble"], inspected_body)
+            self.assertIn("qwen_think_preamble", inspected_body["warnings"])
+            inline = root / "Inline-Template-MLX"
+            inline.mkdir()
+            (inline / "config.json").write_text(json.dumps({"model_type": "qwen3"}), encoding="utf-8")
+            (inline / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{% if add_generation_prompt %}{{ '<think>\\n' }}{% endif %}"}), encoding="utf-8")
+            inspected_inline = subprocess.run(cmd + ["inspect", str(inline)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(inspected_inline.returncode, 0, inspected_inline.stderr + inspected_inline.stdout)
+            inspected_inline_body = json.loads(inspected_inline.stdout)
+            self.assertEqual(inspected_inline_body["template"]["source"], "tokenizer_config.json")
+            self.assertTrue(inspected_inline_body["template"]["bad_think_preamble"], inspected_inline_body)
+            self.assertFalse(inspected_inline_body["template"]["recommended_overlay"], inspected_inline_body)
+            overlay = root / "Qwen-Test-MLX-served"
+            overlaid = subprocess.run(cmd + ["overlay", str(model), "--output", str(overlay)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(overlaid.returncode, 0, overlaid.stderr + overlaid.stdout)
+            overlaid_body = json.loads(overlaid.stdout)
+            self.assertTrue(overlaid_body["ok"], overlaid_body)
+            self.assertTrue(overlaid_body["patched"])
+            self.assertTrue((overlay / "config.json").exists())
+            self.assertIn("</think>", (overlay / "chat_template.jinja").read_text(encoding="utf-8"))
+            self.assertIn("<think>", (model / "chat_template.jinja").read_text(encoding="utf-8"), "source artifact must stay untouched")
+            unsafe = subprocess.run(cmd + ["overlay", str(model), "--output", str(root), "--overwrite"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(unsafe.returncode, 2, unsafe.stderr + unsafe.stdout)
+            self.assertTrue(model.exists(), "unsafe overwrite guard must not delete the model root")
+            other_served = root / "other-served"
+            other_served.mkdir()
+            (other_served / "keep.txt").write_text("keep", encoding="utf-8")
+            unsafe_served = subprocess.run(cmd + ["overlay", str(model), "--output", str(other_served), "--overwrite"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(unsafe_served.returncode, 2, unsafe_served.stderr + unsafe_served.stdout)
+            self.assertTrue((other_served / "keep.txt").exists(), "overwrite guard must not delete arbitrary *-served dirs")
+            ancestor = root / "ancestor-served"
+            child = ancestor / "Child-MLX"
+            child.mkdir(parents=True)
+            (child / "config.json").write_text(json.dumps({"model_type": "qwen3"}), encoding="utf-8")
+            (child / "chat_template.jinja").write_text("{% if add_generation_prompt %}<think>{% endif %}", encoding="utf-8")
+            unsafe_ancestor = subprocess.run(cmd + ["overlay", str(child), "--output", str(ancestor), "--overwrite"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(unsafe_ancestor.returncode, 2, unsafe_ancestor.stderr + unsafe_ancestor.stdout)
+            self.assertTrue(child.exists(), "overwrite guard must not delete an ancestor of the source")
+            inspected_overlay = subprocess.run(cmd + ["inspect", str(overlay)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(inspected_overlay.returncode, 0, inspected_overlay.stderr + inspected_overlay.stdout)
+            inspected_overlay_body = json.loads(inspected_overlay.stdout)
+            self.assertFalse(inspected_overlay_body["template"]["bad_think_preamble"], inspected_overlay_body)
+            manifest_path = root / "mlx.toml"
+            manifest = subprocess.run(cmd + ["manifest", str(overlay), "--output", str(manifest_path), "--id", "qwen-test-served", "--port", "8123"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(manifest.returncode, 0, manifest.stderr + manifest.stdout)
+            manifest_body = json.loads(manifest.stdout)
+            self.assertTrue(manifest_body["ok"], manifest_body)
+            loaded = load_manifest(manifest_path)
+            self.assertEqual(loaded.id, "qwen-test-served")
+            self.assertEqual(loaded.model_id, "default_model")
+            self.assertEqual(loaded.endpoint, "http://127.0.0.1:8123/v1")
+            self.assertEqual(loaded.start.readiness_contains, str(overlay.resolve()))
+            self.assertIn(str(overlay.resolve()), loaded.start.command)
+            self.assertIn("mlx_lm", loaded.start.command)
+            self.assertIn('{"enable_thinking":false}', loaded.start.command)
+            bad_alias = subprocess.run(cmd + ["manifest", str(overlay), "--output", str(root / "bad.toml"), "--model-id", "qwen-test-served", "--port", "8123"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_alias.returncode, 2, bad_alias.stderr + bad_alias.stdout)
+
     def test_init_and_version_commands(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

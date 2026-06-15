@@ -1,21 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-modelctl"
-version = "0.8.0"
+version = "0.9.0"
 description = "Manifest-driven lifecycle control for local LLM servers."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "OpenClaw"}]
 keywords = ["llm", "local-inference", "llama.cpp", "mlx", "model-server", "apple-silicon"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Topic :: System :: Systems Administration",

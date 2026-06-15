@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.9.0
+
+- Add `modelctl mlx discover` to find local MLX model directories.
+- Add `modelctl mlx inspect` to flag config/template serving hazards, including Qwen/Qwopus `<think>` generation preambles.
+- Add `modelctl mlx overlay` to create reversible `-served` overlays that symlink weights and patch only `chat_template.jinja`.
+- Add `modelctl mlx manifest` to generate an MLX-focused `modelctl.toml` using `python -m mlx_lm server` with conservative single-user defaults.
+- Include docs/examples in source distributions and modernize package license metadata to kill setuptools deprecation noise.
+
 ## v0.8.0
 
 - Add `modelctl daemon`, a foreground readiness/swap supervisor loop.
