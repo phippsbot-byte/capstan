@@ -5,7 +5,7 @@ import json
 import sys
 
 from .bench_artifacts import write_bench_artifact
-from .fleet import fleet_health
+from .fleet import fleet_health, fleet_status
 from .init import init_manifest
 from .ingest import ingest
 from .manifest import ManifestError, load_manifest
@@ -123,6 +123,10 @@ def add_reports_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
 def add_fleet_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p_fleet = sub.add_parser("fleet", help="Run operations across registered model manifests")
     fleet = p_fleet.add_subparsers(dest="fleet_command", required=True)
+    p_status = fleet.add_parser("status", help="Show operator status across registry entries")
+    p_status.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
+    p_status.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
+    p_status.add_argument("--readiness-timeout", type=float, default=1.0, help="Per-model readiness timeout seconds")
     p_health = fleet.add_parser("health", help="Run health checks across registry entries")
     p_health.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     p_health.add_argument("--max-swap-gib", type=float, default=None, help="Absolute swap ceiling for each model")
@@ -303,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
                 manifest = load_manifest(args.manifest)
                 result = save_report(manifest, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
         if args.command == "fleet":
+            if args.fleet_command == "status":
+                result = fleet_status(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout); emit(result); return 0
             if args.fleet_command == "health":
                 result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
         if args.command == "mlx":

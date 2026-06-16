@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.0
+
+- Add `modelctl fleet status` for a non-gating operator snapshot across registered manifests.
+- Fleet status reports per-lane `ready`/`down`/`invalid` state, PID/log paths, readiness details, current swap, and LaunchAgent plist presence.
+- Add `--readiness-timeout` and `--limit` controls for bounded fleet status scans.
+
 ## v0.13.0
 
 - Add `modelctl fleet health` to run structured health verdicts across registered manifests.

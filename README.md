@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.13.0/local_modelctl-0.13.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.14.0/local_modelctl-0.14.0-py3-none-any.whl
 ```
 
 For local development:
@@ -58,6 +58,7 @@ modelctl bench --preset tiny --output bench.md --format md
 modelctl report --format md --output report.md
 modelctl reports save --format json
 modelctl reports list
+modelctl fleet status
 modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
 modelctl doctor --fix
 modelctl health --max-swap-delta-gib 1 --sample-sec 5
@@ -130,6 +131,7 @@ safe = true
 - `mlx manifest PATH --id NAME --port N --output modelctl.toml` — generate an MLX-focused manifest using `python -m mlx_lm server`; stock MLX request model defaults to `default_model`.
 - `list` — convenience alias for `registry list`; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.
 - `registry add/list/show/remove/use` — manage durable manifest registry entries and materialize a registered manifest into a workspace.
+- `fleet status [--registry DIR]` — show the operator snapshot across registered manifests: ready/down/invalid state, PID/log paths, readiness, swap, and LaunchAgent plist presence.
 - `fleet health [--registry DIR] [--smoke]` — run the structured health verdict across all registered manifests and fail if any lane is critical/invalid.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.

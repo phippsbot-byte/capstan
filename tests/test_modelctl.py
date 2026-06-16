@@ -368,6 +368,26 @@ class ModelCtlTests(unittest.TestCase):
                 self.assertEqual(pretty.returncode, 2, pretty.stderr + pretty.stdout)
                 self.assertIn("healthy", pretty.stdout)
                 self.assertIn("critical", pretty.stdout)
+
+                fleet_status = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "status", "--registry", str(registry), "--readiness-timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(fleet_status.returncode, 0, fleet_status.stderr + fleet_status.stdout)
+                self.assertFalse(fleet_status.stderr.strip(), fleet_status.stderr)
+                status_body = json.loads(fleet_status.stdout)
+                self.assertTrue(status_body["ok"], status_body)
+                self.assertEqual(status_body["count"], 3)
+                self.assertEqual(status_body["states"], {"down": 1, "invalid": 1, "ready": 1})
+                status_rows = {row["id"]: row for row in status_body["models"] if row.get("id")}
+                self.assertTrue(status_rows["healthy"]["ready"], status_body)
+                self.assertEqual(status_rows["healthy"]["state"], "ready")
+                self.assertFalse(status_rows["down"]["ready"], status_body)
+                self.assertEqual(status_rows["down"]["state"], "down")
+                status_bad = [row for row in status_body["models"] if row.get("name") == "bad"]
+                self.assertEqual(status_bad[0]["state"], "invalid")
+                self.assertIn("service", status_rows["healthy"])
+                pretty_status = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "fleet", "status", "--registry", str(registry), "--readiness-timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(pretty_status.returncode, 0, pretty_status.stderr + pretty_status.stdout)
+                self.assertIn("ready", pretty_status.stdout)
+                self.assertIn("invalid", pretty_status.stdout)
             finally:
                 server.shutdown()
                 server.server_close()

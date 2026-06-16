@@ -47,6 +47,7 @@ modelctl -m modelctl.toml bench --preset tiny --output bench.md --format md
 modelctl -m modelctl.toml report --format md --output report.md
 modelctl -m modelctl.toml reports save --format json
 modelctl reports list
+modelctl fleet status
 modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
 modelctl -m modelctl.toml doctor --fix
 modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
@@ -73,7 +74,15 @@ Add `--smoke` when you want endpoint behavior included, and `--max-latency-sec` 
 modelctl -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-gib 1 --sample-sec 5
 ```
 
-## Fleet health
+## Fleet status and health
+
+Use `fleet status` first when you need to know what is actually alive:
+
+```bash
+modelctl fleet status
+```
+
+It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, returns each lane as `ready`, `down`, or `invalid`, and includes PID/log paths, readiness detail, current swap, and whether the expected LaunchAgent plist exists. It is an operator snapshot, not a gate, so down/invalid rows still return machine-readable JSON with exit code 0.
 
 Once manifests are registered, use `fleet health` as the cheap operator gate across the whole local lane set:
 
