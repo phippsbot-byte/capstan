@@ -15,7 +15,7 @@ from .registry import add_registry, list_registry, remove_registry, show_registr
 from .report import write_report
 from .report_store import list_reports, save_report, show_report
 from .runner import start, stop, wait_ready
-from .service import ServiceError, install_service, service_action
+from .service import ServiceError, diff_service, install_service, service_action
 from . import __version__
 
 PRETTY = False
@@ -183,6 +183,22 @@ def add_service_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p_install.add_argument("--no-wait", action="store_true", help="Pass --no-wait to daemon restarts")
     p_install.add_argument("--overwrite", action="store_true")
     p_install.add_argument("--dry-run", action="store_true")
+    p_diff = svc.add_parser("diff", help="Compare installed LaunchAgent plist with desired manifest/service options")
+    p_diff.add_argument("--label", default=None, help="launchd label; defaults to ai.modelctl.<manifest-id>")
+    p_diff.add_argument("--restart", action="store_true", help="Desired daemon may restart/start the model on breach")
+    p_diff.add_argument("--max-swap-gib", type=float, default=None, help="Desired absolute swap ceiling")
+    p_diff.add_argument("--max-swap-delta-gib", type=float, default=None, help="Desired health-mode maximum allowed swap growth")
+    p_diff.add_argument("--sample-sec", type=float, default=0.0, help="Desired health-mode seconds between swap samples")
+    p_diff.add_argument("--health-mode", action="store_true", help="Desired daemon uses modelctl health verdicts")
+    p_diff.add_argument("--smoke", action="store_true", help="Desired health-mode daemon includes manifest smoke test")
+    p_diff.add_argument("--max-latency-sec", type=float, default=None, help="Desired health-mode maximum allowed smoke latency")
+    p_diff.add_argument("--interval", type=float, default=30.0, help="Desired daemon sample interval seconds")
+    p_diff.add_argument("--python", default=None, help="Desired Python executable to run modelctl from")
+    p_diff.add_argument("--service-log", default=None, help="Desired LaunchAgent stdout log path")
+    p_diff.add_argument("--run-at-load", action="store_true", help="Desired RunAtLoad value")
+    p_diff.add_argument("--no-keepalive", action="store_true", help="Desired KeepAlive=false")
+    p_diff.add_argument("--no-wait", action="store_true", help="Desired daemon restarts pass --no-wait")
+    p_diff.add_argument("--content", action="store_true", help="Include full desired and installed plist dictionaries")
     for name in ("start", "stop", "restart", "status", "uninstall"):
         p = svc.add_parser(name, help=f"{name} the launchd service")
         p.add_argument("--label", default=None)
@@ -362,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.service_command == "install":
                 service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec > 0 or args.smoke or args.max_latency_sec is not None)
                 result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+            if args.service_command == "diff":
+                service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec > 0 or args.smoke or args.max_latency_sec is not None)
+                result = diff_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, wait=not args.no_wait, include_content=args.content); emit(result); return 0 if result.get("ok") else 2
             result = service_action(manifest, args.service_command, label=args.label, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "cleanup":
             emit(cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)); return 0

@@ -10,11 +10,13 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from modelctl.manifest import load_manifest
 from modelctl.ops import cleanup_execute, cleanup_plan, preflight
+from modelctl.system import pid_alive
 
 
 def free_port() -> int:
@@ -28,6 +30,39 @@ class ModelCtlTests(unittest.TestCase):
         path = root / "modelctl.toml"
         path.write_text(textwrap.dedent(content), encoding="utf-8")
         return path
+
+    def test_pid_alive_treats_zombie_processes_as_dead(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pid_file = root / "child.pid"
+            script = root / "zombie_parent.py"
+            script.write_text(textwrap.dedent('''
+                import subprocess, sys, time
+                child = subprocess.Popen([sys.executable, "-c", "pass"])
+                open(sys.argv[1], "w", encoding="utf-8").write(str(child.pid))
+                time.sleep(60)
+            '''), encoding="utf-8")
+            parent = subprocess.Popen([sys.executable, str(script), str(pid_file)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.time() + 10
+                child_pid = None
+                while time.time() < deadline:
+                    if pid_file.exists():
+                        child_pid = int(pid_file.read_text(encoding="utf-8"))
+                        stat = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+                        if stat.returncode == 0 and "Z" in stat.stdout:
+                            break
+                    time.sleep(0.05)
+                self.assertIsNotNone(child_pid)
+                assert child_pid is not None
+                self.assertFalse(pid_alive(child_pid), "zombie PIDs must not count as active model processes")
+            finally:
+                parent.terminate()
+                try:
+                    parent.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    parent.kill()
+                    parent.wait(timeout=5)
 
     def test_manifest_expands_and_validates(self):
         with tempfile.TemporaryDirectory() as td:
@@ -499,6 +534,34 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("--restart", plist["ProgramArguments"])
             self.assertIn("--max-swap-gib", plist["ProgramArguments"])
             self.assertIn("MODELCTL_MANIFEST", plist["EnvironmentVariables"])
+
+            same_diff = subprocess.run(cmd + ["service", "diff", "--restart", "--max-swap-gib", "4", "--interval", "5"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(same_diff.returncode, 0, same_diff.stderr + same_diff.stdout)
+            same_diff_body = json.loads(same_diff.stdout)
+            self.assertTrue(same_diff_body["ok"], same_diff_body)
+            self.assertFalse(same_diff_body["drift"], same_diff_body)
+            self.assertEqual(same_diff_body["differences"], [])
+
+            plist["ProgramArguments"][0] = "/custom/python3.11"
+            plist_path.write_bytes(plistlib.dumps(plist, sort_keys=False))
+            preserved_python_diff = subprocess.run(cmd + ["service", "diff", "--restart", "--max-swap-gib", "4", "--interval", "5"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(preserved_python_diff.returncode, 0, preserved_python_diff.stderr + preserved_python_diff.stdout)
+            explicit_python_diff = subprocess.run(cmd + ["service", "diff", "--restart", "--max-swap-gib", "4", "--interval", "5", "--python", sys.executable], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(explicit_python_diff.returncode, 2, explicit_python_diff.stderr + explicit_python_diff.stdout)
+            explicit_python_body = json.loads(explicit_python_diff.stdout)
+            self.assertIn("ProgramArguments", [row["key"] for row in explicit_python_body["differences"]])
+
+            drift = subprocess.run(cmd + ["service", "diff", "--restart", "--max-swap-gib", "8", "--interval", "5"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(drift.returncode, 2, drift.stderr + drift.stdout)
+            drift_body = json.loads(drift.stdout)
+            self.assertFalse(drift_body["ok"], drift_body)
+            self.assertTrue(drift_body["drift"], drift_body)
+            self.assertIn("ProgramArguments", [row["key"] for row in drift_body["differences"]])
+
+            missing_diff = subprocess.run(cmd + ["service", "diff", "--label", "ai.modelctl.missing"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(missing_diff.returncode, 2, missing_diff.stderr + missing_diff.stdout)
+            missing_diff_body = json.loads(missing_diff.stdout)
+            self.assertEqual(missing_diff_body["error"], "plist_missing")
 
             duplicate = subprocess.run(cmd + ["service", "install"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(duplicate.returncode, 2, duplicate.stderr + duplicate.stdout)

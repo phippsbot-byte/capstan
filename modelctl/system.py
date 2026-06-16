@@ -21,6 +21,16 @@ def run(cmd: list[str], timeout: int = 10) -> tuple[int, str]:
         return 999, f"{type(exc).__name__}: {exc}"
 
 
+def _pid_stat(pid: int) -> str | None:
+    try:
+        proc = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -28,6 +38,9 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    stat = _pid_stat(pid)
+    if stat and "Z" in stat:
+        return False
     return True
 
 

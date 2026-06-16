@@ -54,6 +54,7 @@ modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
 modelctl -m modelctl.toml daemon --health-mode --iterations 1 --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5
 modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
 modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
+modelctl -m modelctl.toml service diff --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
 modelctl -m modelctl.toml service start
 modelctl -m modelctl.toml service status
 modelctl -m modelctl.toml watchdog --max-swap-gib 4 --duration 0
@@ -111,6 +112,12 @@ modelctl -m modelctl.toml service status
 modelctl -m modelctl.toml service restart
 modelctl -m modelctl.toml service stop
 modelctl -m modelctl.toml service uninstall
+```
+
+Use `service diff` whenever you change a manifest or desired daemon flags. It renders the desired LaunchAgent exactly like `service install`, reads the installed plist, preserves the installed Python executable unless `--python` is supplied, and exits non-zero if ProgramArguments, logs, environment, KeepAlive, RunAtLoad, or other plist keys drifted:
+
+```bash
+modelctl -m modelctl.toml service diff --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
 ```
 
 `--restart` is explicit because it lets the daemon stop/start the model on readiness or swap breach. No sneaky self-healing time bombs.

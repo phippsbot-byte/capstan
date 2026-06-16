@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.15.0
+
+- Add `modelctl service diff` to compare the installed LaunchAgent plist with desired manifest/service options.
+- Service diff returns structured drift rows for plist keys and exits non-zero on drift, missing plist, or invalid plist.
+- Support install-like desired flags plus `--content` for full desired/installed plist inspection; default diff preserves the installed Python executable unless `--python` is supplied.
+- Treat zombie PIDs as dead so stale PID files do not block restart/doctor recovery.
+
 ## v0.14.0
 
 - Add `modelctl fleet status` for a non-gating operator snapshot across registered manifests.

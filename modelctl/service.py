@@ -171,6 +171,97 @@ def render_launchd_plist(
     }
 
 
+def _plist_differences(desired: dict[str, Any], installed: dict[str, Any]) -> list[dict[str, Any]]:
+    ordered_keys = list(desired.keys()) + [key for key in installed.keys() if key not in desired]
+    rows: list[dict[str, Any]] = []
+    for key in ordered_keys:
+        desired_value = desired.get(key)
+        installed_value = installed.get(key)
+        if desired_value != installed_value:
+            rows.append({"key": key, "desired": desired_value, "installed": installed_value})
+    return rows
+
+
+def diff_service(
+    manifest: ModelManifest,
+    *,
+    label: str | None = None,
+    restart: bool = False,
+    max_swap_gib: float | None = None,
+    max_swap_delta_gib: float | None = None,
+    sample_sec: float = 0.0,
+    include_smoke: bool = False,
+    max_latency_sec: float | None = None,
+    health_mode: bool = False,
+    interval_sec: float = 30.0,
+    python: str | None = None,
+    keep_alive: bool = True,
+    run_at_load: bool = False,
+    service_log_path: str | None = None,
+    wait: bool = True,
+    include_content: bool = False,
+) -> dict[str, Any]:
+    """Compare the installed LaunchAgent plist to the desired render."""
+    service_label = resolve_label(manifest, label)
+    plist_path = service_plist_path(service_label)
+    installed: dict[str, Any] | None = None
+    installed_error: str | None = None
+    if plist_path.exists():
+        try:
+            installed = plistlib.loads(plist_path.read_bytes())
+        except Exception as exc:
+            installed_error = f"{type(exc).__name__}: {exc}"
+    effective_python = python
+    if effective_python is None and installed:
+        installed_args = installed.get("ProgramArguments")
+        if isinstance(installed_args, list) and installed_args and isinstance(installed_args[0], str):
+            effective_python = installed_args[0]
+    rendered = render_launchd_plist(
+        manifest,
+        label=service_label,
+        restart=restart,
+        max_swap_gib=max_swap_gib,
+        max_swap_delta_gib=max_swap_delta_gib,
+        sample_sec=sample_sec,
+        include_smoke=include_smoke,
+        max_latency_sec=max_latency_sec,
+        health_mode=health_mode,
+        interval_sec=interval_sec,
+        python=effective_python,
+        keep_alive=keep_alive,
+        run_at_load=run_at_load,
+        service_log_path=service_log_path,
+        wait=wait,
+    )
+    base: dict[str, Any] = {
+        "action": "diff",
+        "label": service_label,
+        "plist_path": str(plist_path),
+        "plist_exists": plist_path.exists(),
+        "desired_program_arguments": rendered["program_arguments"],
+        "differences": [],
+        "drift": False,
+        "ok": True,
+    }
+    if not plist_path.exists():
+        return {**base, "ok": False, "drift": True, "error": "plist_missing"}
+    if installed is None:
+        return {**base, "ok": False, "drift": True, "error": "plist_invalid", "details": installed_error or "unable to parse plist"}
+    differences = _plist_differences(rendered["plist"], installed)
+    drift = bool(differences)
+    result = {
+        **base,
+        "ok": not drift,
+        "drift": drift,
+        "differences": differences,
+        "installed_program_arguments": installed.get("ProgramArguments"),
+    }
+    if include_content:
+        result["desired_plist"] = rendered["plist"]
+        result["installed_plist"] = installed
+    return result
+
+
 def install_service(
     manifest: ModelManifest,
     *,
