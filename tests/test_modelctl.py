@@ -9,7 +9,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
+import urllib.request
 
 from modelctl.manifest import load_manifest
 from modelctl.ops import cleanup_execute, cleanup_plan, preflight
@@ -294,6 +296,99 @@ class ModelCtlTests(unittest.TestCase):
             rm = subprocess.run([sys.executable, "-m", "modelctl.cli", "registry", "remove", "managed-model", "--registry", str(managed)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(rm.returncode, 0, rm.stderr + rm.stdout)
             self.assertFalse((managed / "managed-model.toml").exists())
+
+    def test_fleet_health_scans_registry_entries(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            port = free_port()
+            server = root / "fake_openai_server.py"
+            server.write_text(textwrap.dedent(r'''
+                import json, sys
+                from http.server import BaseHTTPRequestHandler, HTTPServer
+                port = int(sys.argv[1])
+                class H(BaseHTTPRequestHandler):
+                    def log_message(self, *args):
+                        pass
+                    def _send(self, body, status=200):
+                        data=json.dumps(body).encode()
+                        self.send_response(status)
+                        self.send_header('Content-Type','application/json')
+                        self.send_header('Content-Length',str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    def do_GET(self):
+                        if self.path == '/v1/models':
+                            self._send({'object':'list','data':[{'id':'healthy-model'}]})
+                        else:
+                            self._send({'error':'not found'}, 404)
+                HTTPServer(('127.0.0.1', port), H).serve_forever()
+            '''), encoding="utf-8")
+            proc = subprocess.Popen([sys.executable, str(server), str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(30):
+                    try:
+                        urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=0.2).read()
+                        break
+                    except Exception:
+                        time.sleep(0.1)
+                else:
+                    self.fail("fake server did not start")
+
+                (registry / "healthy.toml").write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "healthy"
+                    model_id = "healthy-model"
+                    endpoint = "http://127.0.0.1:{port}/v1"
+                '''), encoding="utf-8")
+                down_port = free_port()
+                (registry / "down.toml").write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "down"
+                    model_id = "down-model"
+                    endpoint = "http://127.0.0.1:{down_port}/v1"
+                '''), encoding="utf-8")
+                env = os.environ.copy()
+                env["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                env.pop("MODELCTL_REGISTRY", None)
+                empty_registry = root / "empty-registry"
+                empty_registry.mkdir()
+                empty = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "health", "--registry", str(empty_registry)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(empty.returncode, 2, empty.stderr + empty.stdout)
+                empty_body = json.loads(empty.stdout)
+                self.assertEqual(empty_body["status"], "empty")
+                self.assertIn("no_models", empty_body["issues"])
+
+                (registry / "bad.toml").write_text("[model\nthis is not toml", encoding="utf-8")
+                result = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "health", "--registry", str(registry), "--max-swap-gib", "999999"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+                self.assertFalse(result.stderr.strip(), result.stderr)
+                body = json.loads(result.stdout)
+                self.assertFalse(body["ok"], body)
+                self.assertEqual(body["count"], 3)
+                rows = {row["id"]: row for row in body["models"] if row.get("id")}
+                bad_rows = [row for row in body["models"] if row.get("name") == "bad"]
+                self.assertEqual(len(bad_rows), 1, body)
+                self.assertEqual(bad_rows[0]["status"], "invalid")
+                self.assertIn("manifest_invalid", bad_rows[0]["issues"])
+                self.assertTrue(rows["healthy"]["ok"], body)
+                self.assertEqual(rows["healthy"]["status"], "ok")
+                self.assertFalse(rows["down"]["ok"], body)
+                self.assertEqual(rows["down"]["status"], "critical")
+                self.assertIn("readiness", rows["down"]["issues"])
+                pretty = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "fleet", "health", "--registry", str(registry), "--max-swap-gib", "999999"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(pretty.returncode, 2, pretty.stderr + pretty.stdout)
+                self.assertIn("healthy", pretty.stdout)
+                self.assertIn("critical", pretty.stdout)
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
     def test_doctor_fix_and_pretty_output(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

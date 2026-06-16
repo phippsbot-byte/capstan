@@ -47,6 +47,7 @@ modelctl -m modelctl.toml bench --preset tiny --output bench.md --format md
 modelctl -m modelctl.toml report --format md --output report.md
 modelctl -m modelctl.toml reports save --format json
 modelctl reports list
+modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
 modelctl -m modelctl.toml doctor --fix
 modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
 modelctl -m modelctl.toml daemon --health-mode --iterations 1 --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5
@@ -71,6 +72,16 @@ Add `--smoke` when you want endpoint behavior included, and `--max-latency-sec` 
 ```bash
 modelctl -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-gib 1 --sample-sec 5
 ```
+
+## Fleet health
+
+Once manifests are registered, use `fleet health` as the cheap operator gate across the whole local lane set:
+
+```bash
+modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
+```
+
+It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each manifest, and exits non-zero if any lane is critical/invalid or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet.
 
 ## macOS service wrapper
 

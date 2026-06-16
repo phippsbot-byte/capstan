@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.13.0
+
+- Add `modelctl fleet health` to run structured health verdicts across registered manifests.
+- Fleet health returns per-model status, issues, warnings, and nested health details, and exits non-zero if any lane is critical/invalid or no registered lanes are found.
+- Support fleet-level swap ceilings, swap delta sampling, optional smoke checks, registry overrides, and bounded `--limit` scans.
+
 ## v0.12.0
 
 - Add `daemon --health-mode` so long-running supervisors can use the structured health verdict instead of legacy watchdog-only sampling.

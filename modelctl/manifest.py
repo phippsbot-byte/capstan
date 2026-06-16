@@ -117,7 +117,10 @@ def load_manifest(path: str | Path) -> ModelManifest:
     p = Path(path).expanduser().resolve()
     if not p.exists():
         raise ManifestError(f"manifest not found: {p}")
-    data = tomllib.loads(p.read_text(encoding="utf-8"))
+    try:
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ManifestError(f"invalid TOML in {p}: {exc}") from exc
     model = _as_table(data, "model")
     try:
         model_id = str(model["model_id"])
