@@ -9,9 +9,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import time
+import threading
 import unittest
-import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from modelctl.manifest import load_manifest
 from modelctl.ops import cleanup_execute, cleanup_plan, preflight
@@ -302,40 +302,27 @@ class ModelCtlTests(unittest.TestCase):
             root = Path(td)
             registry = root / "registry"
             registry.mkdir()
-            port = free_port()
-            server = root / "fake_openai_server.py"
-            server.write_text(textwrap.dedent(r'''
-                import json, sys
-                from http.server import BaseHTTPRequestHandler, HTTPServer
-                port = int(sys.argv[1])
-                class H(BaseHTTPRequestHandler):
-                    def log_message(self, *args):
-                        pass
-                    def _send(self, body, status=200):
-                        data=json.dumps(body).encode()
-                        self.send_response(status)
-                        self.send_header('Content-Type','application/json')
-                        self.send_header('Content-Length',str(len(data)))
-                        self.end_headers()
-                        self.wfile.write(data)
-                    def do_GET(self):
-                        if self.path == '/v1/models':
-                            self._send({'object':'list','data':[{'id':'healthy-model'}]})
-                        else:
-                            self._send({'error':'not found'}, 404)
-                HTTPServer(('127.0.0.1', port), H).serve_forever()
-            '''), encoding="utf-8")
-            proc = subprocess.Popen([sys.executable, str(server), str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                for _ in range(30):
-                    try:
-                        urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=0.2).read()
-                        break
-                    except Exception:
-                        time.sleep(0.1)
-                else:
-                    self.fail("fake server did not start")
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+                def _send(self, body, status=200):
+                    data = json.dumps(body).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                def do_GET(self):
+                    if self.path == "/v1/models":
+                        self._send({"object": "list", "data": [{"id": "healthy-model"}]})
+                    else:
+                        self._send({"error": "not found"}, 404)
 
+            server = HTTPServer(("127.0.0.1", 0), H)
+            port = int(server.server_address[1])
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
                 (registry / "healthy.toml").write_text(textwrap.dedent(f'''
                     [model]
                     id = "healthy"
@@ -382,12 +369,9 @@ class ModelCtlTests(unittest.TestCase):
                 self.assertIn("healthy", pretty.stdout)
                 self.assertIn("critical", pretty.stdout)
             finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
     def test_doctor_fix_and_pretty_output(self):
         with tempfile.TemporaryDirectory() as td:
