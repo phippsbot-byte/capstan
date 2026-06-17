@@ -433,31 +433,42 @@ class ModelCtlTests(unittest.TestCase):
             root = Path(td)
             registry = root / "registry"
             registry.mkdir()
-            port = free_port()
-            server = root / "recover_server.py"
-            server.write_text(textwrap.dedent(r'''
-                import json, sys
-                from http.server import BaseHTTPRequestHandler, HTTPServer
-                port = int(sys.argv[1])
-                class H(BaseHTTPRequestHandler):
-                    def log_message(self, *args):
-                        pass
-                    def _send(self, body, status=200):
-                        data=json.dumps(body).encode()
-                        self.send_response(status)
-                        self.send_header('Content-Type','application/json')
-                        self.send_header('Content-Length',str(len(data)))
-                        self.end_headers()
-                        self.wfile.write(data)
-                    def do_GET(self):
-                        if self.path == '/v1/models':
-                            self._send({'object':'list','data':[{'id':'recover-model'}]})
-                        else:
-                            self._send({'error':'not found'}, 404)
-                    def do_POST(self):
-                        self._send({'choices':[{'message':{'content':'pong'},'finish_reason':'stop'}]})
-                HTTPServer(('127.0.0.1', port), H).serve_forever()
+            marker = root / "recover.ready"
+            starter = root / "mark_ready.py"
+            starter.write_text(textwrap.dedent('''
+                from pathlib import Path
+                import sys
+                import time
+                Path(sys.argv[1]).write_text("ready", encoding="utf-8")
+                time.sleep(60)
             '''), encoding="utf-8")
+
+            class RecoverH(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+                def _send(self, body, status=200):
+                    data = json.dumps(body).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                def do_GET(self):
+                    if self.path == "/v1/models" and marker.exists():
+                        self._send({"object": "list", "data": [{"id": "recover-model"}]})
+                    elif self.path == "/v1/models":
+                        self._send({"object": "list", "data": []})
+                    else:
+                        self._send({"error": "not found"}, 404)
+
+            readiness_server = HTTPServer(("127.0.0.1", 0), RecoverH)
+            port = int(readiness_server.server_address[1])
+            readiness_thread = threading.Thread(target=readiness_server.serve_forever, daemon=True)
+            readiness_thread.start()
+            self.addCleanup(readiness_server.shutdown)
+            self.addCleanup(readiness_server.server_close)
+            self.addCleanup(lambda: readiness_thread.join(timeout=5))
+
             (registry / "recover.toml").write_text(textwrap.dedent(f'''
                 [model]
                 id = "recover"
@@ -465,7 +476,7 @@ class ModelCtlTests(unittest.TestCase):
                 endpoint = "http://127.0.0.1:{port}/v1"
 
                 [start]
-                command = ["{sys.executable}", "{server}", "{port}"]
+                command = ["{sys.executable}", "{starter}", "{marker}"]
                 cwd = "{root}"
                 log_path = "{root / 'recover.log'}"
                 pid_path = "{root / 'recover.pid.json'}"
