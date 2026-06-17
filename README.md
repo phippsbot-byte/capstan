@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.15.0/local_modelctl-0.15.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.16.0/local_modelctl-0.16.0-py3-none-any.whl
 ```
 
 For local development:
