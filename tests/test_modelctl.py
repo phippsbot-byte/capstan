@@ -15,7 +15,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from modelctl.manifest import load_manifest
-from modelctl.ops import cleanup_execute, cleanup_plan, preflight
+from modelctl.ops import cleanup_execute, cleanup_plan, doctor_fix, preflight
 from modelctl.system import pid_alive
 
 
@@ -422,6 +422,418 @@ class ModelCtlTests(unittest.TestCase):
             self.assertTrue(result["started"], result)
             self.assertTrue(captured["stdout"].closed, "parent must close log fd after Popen duplicates it into the child")
 
+    def test_rotate_stops_current_starts_target_and_hands_off_pid_state(self):
+        if os.environ.get("CI"):
+            self.skipTest("subprocess same-port rotation is flaky on GitHub macOS runners; unit rotate paths cover CI")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            server = root / "model_server.py"
+            server.write_text(textwrap.dedent(r'''
+                import json, sys
+                from http.server import BaseHTTPRequestHandler, HTTPServer
+                port = int(sys.argv[1])
+                model = sys.argv[2]
+                class H(BaseHTTPRequestHandler):
+                    def log_message(self, *args):
+                        pass
+                    def _send(self, body, status=200):
+                        data = json.dumps(body).encode()
+                        self.send_response(status)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    def do_GET(self):
+                        if self.path == '/v1/models':
+                            self._send({'object':'list','data':[{'id':model}]})
+                        else:
+                            self._send({'error':'not found'}, 404)
+                    def do_POST(self):
+                        if self.path == '/v1/chat/completions':
+                            self._send({'choices':[{'message':{'content':'pong'},'finish_reason':'stop'}]})
+                        else:
+                            self._send({'error':'not found'}, 404)
+                class ReuseHTTPServer(HTTPServer):
+                    allow_reuse_address = True
+                ReuseHTTPServer(('127.0.0.1', port), H).serve_forever()
+            '''), encoding="utf-8")
+            current_port = free_port()
+            target_port = current_port
+            current_pid = root / "current.pid.json"
+            target_pid = root / "target.pid.json"
+            current_manifest = root / "current.toml"
+            target_manifest = root / "target.toml"
+            current_manifest.write_text(textwrap.dedent(f'''
+                [model]
+                id = "current"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:{current_port}/v1"
+
+                [start]
+                command = ["{sys.executable}", "{server}", "{current_port}", "stable-model"]
+                cwd = "{root}"
+                log_path = "{root / 'current.log'}"
+                pid_path = "{current_pid}"
+                startup_timeout_sec = 30
+                readiness_url = "http://127.0.0.1:{current_port}/v1/models"
+                readiness_contains = "stable-model"
+            '''), encoding="utf-8")
+            target_manifest.write_text(textwrap.dedent(f'''
+                [model]
+                id = "target"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:{target_port}/v1"
+
+                [start]
+                command = ["{sys.executable}", "{server}", "{target_port}", "stable-model"]
+                cwd = "{root}"
+                log_path = "{root / 'target.log'}"
+                pid_path = "{target_pid}"
+                startup_timeout_sec = 30
+                readiness_url = "http://127.0.0.1:{target_port}/v1/models"
+                readiness_contains = "stable-model"
+            '''), encoding="utf-8")
+
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(current_manifest)]
+            started = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=75)
+            self.assertEqual(started.returncode, 0, started.stderr + started.stdout)
+            old_pid = json.loads(current_pid.read_text(encoding="utf-8"))["pid"]
+            self.assertTrue(pid_alive(old_pid))
+
+            rotated = subprocess.run(cmd + ["rotate", "--to", str(target_manifest), "--readiness-timeout", "30"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+            self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
+            body = json.loads(rotated.stdout)
+            self.assertTrue(body["ok"], body)
+            self.assertEqual(body["from"]["id"], "current")
+            self.assertEqual(body["to"]["id"], "target")
+            self.assertTrue(body["readiness"]["ready"], body)
+            self.assertEqual(body["handoff"]["current_pid_path"], str(current_pid))
+            self.assertEqual(body["handoff"]["target_pid_path"], str(target_pid))
+            self.assertTrue(body["handoff"]["target_pid_state_removed"], body)
+            self.assertFalse(target_pid.exists(), "target pid state should be moved to the current manifest owner")
+            handed_off = json.loads(current_pid.read_text(encoding="utf-8"))
+            new_pid = handed_off["pid"]
+            self.assertNotEqual(old_pid, new_pid)
+            self.assertTrue(pid_alive(new_pid))
+            self.assertFalse(pid_alive(old_pid), "old model process should be stopped before target handoff")
+            self.assertEqual(handed_off["rotated_from"]["id"], "current")
+            self.assertEqual(handed_off["rotated_to"]["id"], "target")
+            self.assertEqual(handed_off["manifest"], str(current_manifest.resolve()))
+            self.assertEqual(handed_off["source_manifest"], str(target_manifest.resolve()))
+            status = subprocess.run(cmd + ["status"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(status.returncode, 0, status.stderr + status.stdout)
+            status_body = json.loads(status.stdout)
+            self.assertEqual(status_body["pid"], new_pid, status_body)
+            self.assertTrue(status_body["readiness"]["ready"], status_body)
+
+            stopped = subprocess.run(cmd + ["stop"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(stopped.returncode, 0, stopped.stderr + stopped.stdout)
+            self.assertFalse(pid_alive(new_pid))
+
+    def test_rotate_readiness_failure_rolls_back_current_owner(self):
+        if os.environ.get("CI"):
+            self.skipTest("subprocess same-port rotation is flaky on GitHub macOS runners; unit rotate paths cover CI")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            server = root / "model_server.py"
+            server.write_text(textwrap.dedent(r'''
+                import json, sys
+                from http.server import BaseHTTPRequestHandler, HTTPServer
+                port = int(sys.argv[1])
+                model = sys.argv[2]
+                class H(BaseHTTPRequestHandler):
+                    def log_message(self, *args):
+                        pass
+                    def _send(self, body, status=200):
+                        data = json.dumps(body).encode()
+                        self.send_response(status)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    def do_GET(self):
+                        if self.path == '/v1/models':
+                            self._send({'object':'list','data':[{'id':model}]})
+                        else:
+                            self._send({'error':'not found'}, 404)
+                class ReuseHTTPServer(HTTPServer):
+                    allow_reuse_address = True
+                ReuseHTTPServer(('127.0.0.1', port), H).serve_forever()
+            '''), encoding="utf-8")
+            current_port = free_port()
+            target_port = current_port
+            current_pid = root / "current.pid.json"
+            target_pid = root / "target.pid.json"
+            current_manifest = root / "current.toml"
+            target_manifest = root / "target.toml"
+            current_manifest.write_text(textwrap.dedent(f'''
+                [model]
+                id = "current"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:{current_port}/v1"
+
+                [start]
+                command = ["{sys.executable}", "{server}", "{current_port}", "stable-model"]
+                cwd = "{root}"
+                log_path = "{root / 'current.log'}"
+                pid_path = "{current_pid}"
+                startup_timeout_sec = 30
+                readiness_url = "http://127.0.0.1:{current_port}/v1/models"
+                readiness_contains = "stable-model"
+            '''), encoding="utf-8")
+            target_manifest.write_text(textwrap.dedent(f'''
+                [model]
+                id = "target"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:{target_port}/v1"
+
+                [start]
+                command = ["{sys.executable}", "{server}", "{target_port}", "wrong-model"]
+                cwd = "{root}"
+                log_path = "{root / 'target.log'}"
+                pid_path = "{target_pid}"
+                startup_timeout_sec = 30
+                readiness_url = "http://127.0.0.1:{target_port}/v1/models"
+                readiness_contains = "stable-model"
+            '''), encoding="utf-8")
+
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(current_manifest)]
+            started = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=75)
+            self.assertEqual(started.returncode, 0, started.stderr + started.stdout)
+            original_pid = json.loads(current_pid.read_text(encoding="utf-8"))["pid"]
+
+            rotated = subprocess.run(cmd + ["rotate", "--to", str(target_manifest), "--readiness-timeout", "1"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(rotated.returncode, 2, rotated.stderr + rotated.stdout)
+            body = json.loads(rotated.stdout)
+            self.assertFalse(body["ok"], body)
+            self.assertEqual(body["status"], "target_not_ready")
+            self.assertTrue(body["rollback"]["attempted"], body)
+            self.assertTrue(body["rollback"]["readiness"]["ready"], body)
+            self.assertFalse(target_pid.exists(), "failed target pid state should be cleaned up")
+            rolled_back_pid = json.loads(current_pid.read_text(encoding="utf-8"))["pid"]
+            self.assertNotEqual(original_pid, rolled_back_pid)
+            self.assertTrue(pid_alive(rolled_back_pid))
+
+            stopped = subprocess.run(cmd + ["stop"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(stopped.returncode, 0, stopped.stderr + stopped.stdout)
+
+    def test_rotate_happy_path_hands_off_pid_state_with_mocked_lifecycle(self):
+        from modelctl import runner
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            for path, ident in ((current_path, "current"), (target_path, "target")):
+                path.write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "{ident}"
+                    model_id = "stable-model"
+                    endpoint = "http://127.0.0.1:9000/v1"
+
+                    [start]
+                    command = ["noop"]
+                    pid_path = "{root / (ident + '.pid.json')}"
+                '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            target = load_manifest(target_path)
+            original_active_pid = runner.active_pid
+            original_stop = runner.stop
+            original_start = runner.start
+            original_wait_ready = runner.wait_ready
+            try:
+                runner.active_pid = lambda manifest: 111 if manifest.id == "current" else 222
+                runner.stop = lambda manifest, timeout_sec=10: {"stopped": True, "pid": 111 if manifest.id == "current" else 222}
+                def fake_start(manifest, wait=False):
+                    runner.write_pid_state(manifest, {"pid": 222, "manifest": str(manifest.path)})
+                    return {"started": True, "pid": 222, "pid_path": str(runner.default_pid_path(manifest))}
+                runner.start = fake_start
+                runner.wait_ready = lambda _manifest, timeout_sec=None: {"ready": True}
+                result = runner.rotate(current, target)
+            finally:
+                runner.active_pid = original_active_pid
+                runner.stop = original_stop
+                runner.start = original_start
+                runner.wait_ready = original_wait_ready
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["status"], "rotated")
+            self.assertFalse((root / "target.pid.json").exists())
+            state = json.loads((root / "current.pid.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["pid"], 222)
+            self.assertEqual(state["manifest"], str(current_path.resolve()))
+            self.assertEqual(state["source_manifest"], str(target_path.resolve()))
+
+    def test_rotate_rejects_identity_mismatch_and_bad_timeouts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_manifest = root / "current.toml"
+            target_manifest = root / "target.toml"
+            current_manifest.write_text(textwrap.dedent(f'''
+                [model]
+                id = "current"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:9000/v1"
+
+                [start]
+                command = ["noop"]
+                pid_path = "{root / 'current.pid.json'}"
+            '''), encoding="utf-8")
+            target_manifest.write_text(textwrap.dedent(f'''
+                [model]
+                id = "target"
+                model_id = "different-model"
+                endpoint = "http://127.0.0.1:9001/v1"
+
+                [start]
+                command = ["noop"]
+                pid_path = "{root / 'target.pid.json'}"
+            '''), encoding="utf-8")
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(current_manifest), "rotate", "--to", str(target_manifest), "--dry-run"]
+            mismatch = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(mismatch.returncode, 2, mismatch.stderr + mismatch.stdout)
+            mismatch_body = json.loads(mismatch.stdout)
+            self.assertEqual(mismatch_body["status"], "invalid_request")
+            self.assertIn("target_identity_mismatch", mismatch_body["issues"])
+
+            bad_timeout = subprocess.run(cmd + ["--readiness-timeout", "-1"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_timeout.returncode, 2)
+            self.assertIn("expected a positive finite number", bad_timeout.stderr)
+            bad_nan = subprocess.run(cmd + ["--readiness-timeout", "nan"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_nan.returncode, 2)
+            self.assertIn("expected a positive finite number", bad_nan.stderr)
+            bad_inf = subprocess.run(cmd + ["--readiness-timeout", "inf"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_inf.returncode, 2)
+            self.assertIn("expected a positive finite number", bad_inf.stderr)
+            bad_stop = subprocess.run(cmd + ["--stop-timeout", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_stop.returncode, 2)
+            self.assertIn("expected a positive integer", bad_stop.stderr)
+
+    def test_active_pid_ignores_pid_state_owned_by_other_manifest(self):
+        from modelctl import runner
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = self.write_manifest(root, f'''
+                [model]
+                id = "current"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [start]
+                command = ["noop"]
+                pid_path = "{root / 'owned.pid.json'}"
+            ''')
+            other_path = root / "other.toml"
+            other_path.write_text(textwrap.dedent('''
+                [model]
+                id = "other"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:9/v1"
+            '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            runner.write_pid_state(current, {"pid": os.getpid(), "manifest": str(other_path)})
+            self.assertIsNone(runner.active_pid(current))
+            stop_result = runner.stop(current)
+            self.assertTrue(stop_result["owner_mismatch"], stop_result)
+            self.assertTrue((root / "owned.pid.json").exists())
+            with self.assertRaises(RuntimeError):
+                runner.start(current)
+            fixed = doctor_fix(current)
+            self.assertTrue((root / "owned.pid.json").exists())
+            self.assertIn("pid_state_owner_mismatch_preserved", [row["code"] for row in fixed["fixes"]])
+
+    def test_rotate_rolls_back_if_target_start_raises(self):
+        from modelctl import runner
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            for path, ident in ((current_path, "current"), (target_path, "target")):
+                path.write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "{ident}"
+                    model_id = "stable-model"
+                    endpoint = "http://127.0.0.1:9000/v1"
+
+                    [start]
+                    command = ["noop"]
+                    pid_path = "{root / (ident + '.pid.json')}"
+                '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            target = load_manifest(target_path)
+            original_active_pid = runner.active_pid
+            original_stop = runner.stop
+            original_start = runner.start
+            original_wait_ready = runner.wait_ready
+            try:
+                runner.active_pid = lambda _manifest: 123
+                runner.stop = lambda _manifest, timeout_sec=10: {"stopped": True, "pid": 123}
+                def fake_start(manifest, wait=False):
+                    if manifest.id == "target":
+                        raise RuntimeError("boom")
+                    return {"started": True, "pid": 456}
+                runner.start = fake_start
+                runner.wait_ready = lambda _manifest, timeout_sec=None: {"ready": True}
+                result = runner.rotate(current, target)
+            finally:
+                runner.active_pid = original_active_pid
+                runner.stop = original_stop
+                runner.start = original_start
+                runner.wait_ready = original_wait_ready
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "target_start_failed")
+            self.assertTrue(result["rollback"]["attempted"], result)
+            self.assertTrue(result["rollback"]["readiness"]["ready"], result)
+
+    def test_rotate_rolls_back_if_handoff_replace_fails(self):
+        from modelctl import runner
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            for path, ident in ((current_path, "current"), (target_path, "target")):
+                path.write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "{ident}"
+                    model_id = "stable-model"
+                    endpoint = "http://127.0.0.1:9000/v1"
+
+                    [start]
+                    command = ["noop"]
+                    pid_path = "{root / (ident + '.pid.json')}"
+                '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            target = load_manifest(target_path)
+            original_active_pid = runner.active_pid
+            original_stop = runner.stop
+            original_start = runner.start
+            original_wait_ready = runner.wait_ready
+            original_replace = runner.os.replace
+            stopped: list[str] = []
+            try:
+                runner.active_pid = lambda manifest: 123 if manifest.id == "current" else 456
+                def fake_stop(manifest, timeout_sec=10):
+                    stopped.append(manifest.id)
+                    return {"stopped": True, "pid": 123 if manifest.id == "current" else 456}
+                runner.stop = fake_stop
+                def fake_start(manifest, wait=False):
+                    if manifest.id == "target":
+                        runner.write_pid_state(target, {"pid": 456, "manifest": str(target.path)})
+                        runner.os.replace = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace boom"))
+                        return {"started": True, "pid": 456}
+                    return {"started": True, "pid": 789}
+                runner.start = fake_start
+                runner.wait_ready = lambda _manifest, timeout_sec=None: {"ready": True}
+                result = runner.rotate(current, target)
+            finally:
+                runner.active_pid = original_active_pid
+                runner.stop = original_stop
+                runner.start = original_start
+                runner.wait_ready = original_wait_ready
+                runner.os.replace = original_replace
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "handoff_failed")
+            self.assertIn("target", stopped)
+            self.assertTrue(result["rollback"]["attempted"], result)
+
     def test_cleanup_dry_run_and_safe_execute(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -488,7 +900,9 @@ class ModelCtlTests(unittest.TestCase):
                             self._send({'choices':[{'message':{'content':content},'finish_reason':'stop'}], 'usage': {'completion_tokens': 1}})
                         else:
                             self._send({'error':'not found'}, 404)
-                HTTPServer(('127.0.0.1', port), H).serve_forever()
+                class ReuseHTTPServer(HTTPServer):
+                    allow_reuse_address = True
+                ReuseHTTPServer(('127.0.0.1', port), H).serve_forever()
             '''), encoding="utf-8")
             manifest_path = self.write_manifest(root, f'''
                 [model]

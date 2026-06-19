@@ -48,24 +48,36 @@ modelctl -m modelctl.toml report --format md --output report.md
 modelctl -m modelctl.toml reports save --format json
 modelctl reports list
 modelctl fleet status
-modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
+modelctl fleet health
 modelctl fleet recover             # dry-run recovery plan
 modelctl fleet recover --execute --wait
 modelctl -m modelctl.toml doctor --fix
-modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
-modelctl -m modelctl.toml daemon --health-mode --iterations 1 --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5
-modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
-modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
-modelctl -m modelctl.toml service diff --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
+modelctl -m modelctl.toml health
+modelctl -m modelctl.toml daemon --iterations 1
+modelctl -m modelctl.toml service install --restart --interval 120 --dry-run
+modelctl -m modelctl.toml service install --restart --interval 120 --overwrite
+modelctl -m modelctl.toml service diff --restart --interval 120
 modelctl -m modelctl.toml service start
 modelctl -m modelctl.toml service status
+modelctl -m modelctl.toml rotate --to candidate.toml --readiness-timeout 300
 modelctl -m modelctl.toml watchdog --max-swap-gib 4 --duration 0
 modelctl -m modelctl.toml status
 ```
 
 ## Health checks
 
-`modelctl health` is the cheap green/red operator check. By default it checks PID state, readiness, and the manifest's swap ceiling. For huge local lanes where macOS may retain stale swap, use delta sampling instead of pretending absolute swap tells the whole story:
+`modelctl health` is the cheap green/red operator check. By default it checks PID state, readiness, and manifest-owned `[health]` defaults such as swap ceiling/delta, sample window, smoke, and latency gates.
+
+For huge local lanes where macOS may retain stale swap, set delta sampling in `[health]` instead of repeating flags everywhere:
+
+```toml
+[health]
+max_swap_gib = 128
+max_swap_delta_gib = 1
+sample_sec = 5
+```
+
+CLI flags still override the manifest for one-off probes:
 
 ```bash
 modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
@@ -90,7 +102,7 @@ It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, returns each lan
 Once manifests are registered, use `fleet health` as the cheap operator gate across the whole local lane set:
 
 ```bash
-modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
+modelctl fleet health
 ```
 
 It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each manifest, and exits non-zero if any lane is critical/invalid or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet.
@@ -111,13 +123,13 @@ modelctl fleet recover --execute --wait
 Use `--dry-run` first. It prints the plist path and daemon arguments without touching `~/Library/LaunchAgents`:
 
 ```bash
-modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
+modelctl -m modelctl.toml service install --restart --interval 120 --dry-run
 ```
 
 Then install and control it:
 
 ```bash
-modelctl -m modelctl.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
+modelctl -m modelctl.toml service install --restart --interval 120 --overwrite
 modelctl -m modelctl.toml service start
 modelctl -m modelctl.toml service status
 modelctl -m modelctl.toml service restart
@@ -128,12 +140,22 @@ modelctl -m modelctl.toml service uninstall
 Use `service diff` whenever you change a manifest or desired daemon flags. It renders the desired LaunchAgent exactly like `service install`, reads the installed plist, preserves the installed Python executable unless `--python` is supplied, and exits non-zero if ProgramArguments, logs, environment, KeepAlive, RunAtLoad, or other plist keys drifted:
 
 ```bash
-modelctl -m modelctl.toml service diff --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
+modelctl -m modelctl.toml service diff --restart --interval 120
 ```
 
 `--restart` is explicit because it lets the daemon stop/start the model on readiness or swap breach. No sneaky self-healing time bombs.
 
-For huge macOS model lanes, prefer `--health-mode --max-swap-delta-gib ...` so stale absolute swap does not trigger a pointless restart loop. Keep `--max-swap-gib` as the emergency ceiling.
+For huge macOS model lanes, prefer manifest `[health]` delta checks so stale absolute swap does not trigger a pointless restart loop. Keep `max_swap_gib` as the emergency ceiling.
+
+## Readiness-gated rotation
+
+Use `rotate` when replacing the process behind a stable lane without manual stop/start roulette:
+
+```bash
+modelctl -m active.toml rotate --to candidate.toml --readiness-timeout 300
+```
+
+The target manifest must preserve the current manifest's `[model].endpoint` and `model_id`; it is for rotating the runtime behind a stable lane, not swapping client-facing identities. The sequence is deliberately boring: stop the current process, start the target, wait for the target readiness gate, then atomically move the target PID state into the current manifest's PID path. If target readiness fails, `rotate` stops the target and restarts the current manifest unless `--no-rollback` is set. This is the SSD-lane rotation path; no claiming victory until readiness is green.
 
 For tests or custom service roots, set `MODELCTL_LAUNCHD_DIR`.
 
