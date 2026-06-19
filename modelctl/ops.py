@@ -7,7 +7,7 @@ import time
 
 from .http import http_json
 from .manifest import ModelManifest
-from .runner import active_pid, default_log_path, default_pid_path, readiness_check, read_pid_state, start as start_model, stop
+from .runner import active_pid, default_log_path, default_pid_path, pid_state_owner_mismatch, readiness_check, read_pid_state, start as start_model, stop
 from .system import disk_free_gib, human_bytes, path_size_bytes, port_is_free, swap_used_gib
 
 
@@ -365,8 +365,11 @@ def doctor_fix(manifest: ModelManifest) -> dict[str, Any]:
         pid_path.unlink()
         fixes.append({"code": "invalid_pid_state_removed", "path": str(pid_path)})
     elif pid_state and active_pid(manifest) is None:
-        pid_path.unlink()
-        fixes.append({"code": "stale_pid_state_removed", "path": str(pid_path), "pid_state": pid_state})
+        if pid_state_owner_mismatch(manifest, pid_state):
+            fixes.append({"code": "pid_state_owner_mismatch_preserved", "path": str(pid_path), "pid_state": pid_state})
+        else:
+            pid_path.unlink()
+            fixes.append({"code": "stale_pid_state_removed", "path": str(pid_path), "pid_state": pid_state})
 
     if manifest.start:
         for code, path in (("pid_dir_created", default_pid_path(manifest).parent), ("log_dir_created", default_log_path(manifest).parent)):

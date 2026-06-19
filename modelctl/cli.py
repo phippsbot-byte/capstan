@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 
 from . import __version__
 
 PRETTY = False
 
-MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "health", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service"}
+MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "health", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service", "rotate"}
 BENCH_PRESETS = {
     "tiny": [128],
     "small": [128, 512, 1024],
@@ -77,6 +78,16 @@ def positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("expected a positive integer") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("expected a positive integer")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a positive number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("expected a positive finite number")
     return parsed
 
 
@@ -248,6 +259,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_wait.add_argument("--timeout", type=int, default=None, help="Override startup timeout seconds")
     p_stop = sub.add_parser("stop", help="Stop configured model server")
     p_stop.add_argument("--timeout", type=int, default=10, help="Grace period before SIGKILL")
+    p_rotate = sub.add_parser("rotate", help="Readiness-gated process rotation to another manifest with atomic PID-state handoff")
+    p_rotate.add_argument("--to", required=True, help="Target manifest to start after stopping the current manifest")
+    p_rotate.add_argument("--readiness-timeout", type=positive_float, default=None, help="Seconds to wait for the target readiness gate")
+    p_rotate.add_argument("--stop-timeout", type=positive_int, default=10, help="Grace period before SIGKILL when stopping old/failed processes")
+    p_rotate.add_argument("--no-rollback", action="store_true", help="Do not restart the current manifest if target readiness fails")
+    p_rotate.add_argument("--dry-run", action="store_true", help="Print the rotation plan without side effects")
     sub.add_parser("status", help="Print process/readiness status")
     p_health = sub.add_parser("health", help="Run high-signal readiness, pid, swap, and optional smoke health checks")
     p_health.add_argument("--max-swap-gib", type=float, default=None, help="Absolute swap ceiling; defaults to manifest preflight max_swap_gib")
@@ -361,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         from .manifest import load_manifest
         manifest = load_manifest(args.manifest)
         from .ops import bench, cleanup_execute, cleanup_plan, daemon, doctor, doctor_fix, health, preflight, smoke, soak, status, validate, watchdog
-        from .runner import start, stop, wait_ready
+        from .runner import rotate, start, stop, wait_ready
         if args.command == "validate":
             emit(validate(manifest)); return 0
         if args.command == "preflight":
@@ -372,6 +389,9 @@ def main(argv: list[str] | None = None) -> int:
             result = wait_ready(manifest, timeout_sec=args.timeout); emit(result); return 0 if result.get("ready") else 2
         if args.command == "stop":
             emit(stop(manifest, timeout_sec=args.timeout)); return 0
+        if args.command == "rotate":
+            target = load_manifest(args.to)
+            result = rotate(manifest, target, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "status":
             emit(status(manifest)); return 0
         if args.command == "health":

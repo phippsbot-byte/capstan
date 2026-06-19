@@ -70,6 +70,7 @@ modelctl service install --restart --interval 120 --overwrite
 modelctl service diff --restart --interval 120
 modelctl service start
 modelctl service status
+modelctl rotate --to candidate.toml --readiness-timeout 300
 modelctl watchdog --max-swap-gib 4 --duration 0
 modelctl status
 modelctl cleanup          # dry-run
@@ -147,6 +148,7 @@ safe = true
 - `fleet recover [--registry DIR] [--jobs N] [--execute] [--wait]` — plan safe starts for down registered manifests with `[start]`; dry-run is parallel-capable, but real `--execute --wait` recovery stays serial.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
+- `rotate --to TARGET.toml` — stop the current manifest process, start a same-endpoint/same-model target, verify readiness, then atomically move target PID ownership to the current manifest PID path; failed target readiness rolls back unless `--no-rollback` is set.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
 - `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults.
@@ -173,7 +175,7 @@ safe = true
 - MLX/Qwen chat-template fixes must be reversible overlays, not source artifact mutation.
 - Manifests are the source of truth.
 - Cleanup is dry-run first.
-- Start/stop must be reproducible.
+- Start/stop/rotate must be reproducible and readiness-gated.
 - launchd service install should be previewable with `--dry-run`; no invisible plist surgery.
 - Every promoted model needs a smoke test.
 - If a service manager wedges, make that visible instead of pretending the model is bad.
