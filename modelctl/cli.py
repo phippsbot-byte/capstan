@@ -70,6 +70,16 @@ def parse_int_list(value: str) -> list[int]:
     return items
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return parsed
+
+
 def add_registry_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p_registry = sub.add_parser("registry", help="Manage the manifest registry")
     reg = p_registry.add_subparsers(dest="registry_command", required=True)
@@ -114,6 +124,7 @@ def add_fleet_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     p_status = fleet.add_parser("status", help="Show operator status across registry entries")
     p_status.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     p_status.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
+    p_status.add_argument("--jobs", type=positive_int, default=None, help="Maximum concurrent status probes; defaults to a bounded parallel scan")
     p_status.add_argument("--readiness-timeout", type=float, default=1.0, help="Per-model readiness timeout seconds")
     p_health = fleet.add_parser("health", help="Run health checks across registry entries")
     p_health.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
@@ -123,9 +134,11 @@ def add_fleet_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     p_health.add_argument("--smoke", action="store_true", help="Run each manifest smoke test as part of health")
     p_health.add_argument("--max-latency-sec", type=float, default=None, help="Maximum allowed smoke latency when --smoke is used")
     p_health.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
+    p_health.add_argument("--jobs", type=positive_int, default=None, help="Maximum concurrent health probes; defaults to a bounded parallel scan")
     p_recover = fleet.add_parser("recover", help="Plan or execute safe recovery for down registered models")
     p_recover.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     p_recover.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
+    p_recover.add_argument("--jobs", type=positive_int, default=None, help="Maximum concurrent recovery probes; dry-run defaults to parallel, execute requires serial jobs")
     p_recover.add_argument("--readiness-timeout", type=float, default=1.0, help="Per-model readiness timeout seconds")
     p_recover.add_argument("--execute", action="store_true", help="Actually start recoverable down manifests; requires --wait; dry-run by default")
     p_recover.add_argument("--wait", action="store_true", help="Wait for readiness after starting each model")
@@ -324,11 +337,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "fleet":
             from .fleet import fleet_health, fleet_recover, fleet_status
             if args.fleet_command == "status":
-                result = fleet_status(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout); emit(result); return 0
+                result = fleet_status(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, jobs=args.jobs); emit(result); return 0
             if args.fleet_command == "health":
-                result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
+                result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, limit=args.limit, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
             if args.fleet_command == "recover":
-                result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait); emit(result); return 0 if result.get("ok") else 2
+                result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
         if args.command == "mlx":
             from .mlx import create_overlay, discover_mlx_models, inspect_mlx_model, write_mlx_manifest
             if args.mlx_command == "discover":

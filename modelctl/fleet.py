@@ -4,6 +4,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+import time
 
 from .manifest import ManifestError, load_manifest
 from .ops import health
@@ -34,7 +35,27 @@ def _readiness_timeout(timeout: float) -> float:
     return max(0.001, float(timeout))
 
 
+def _elapsed_sec(started: float) -> float:
+    return round(max(0.0, time.perf_counter() - started), 3)
+
+
+def _worker_count(count: int, jobs: int | None, *, default_jobs: int = 32) -> int:
+    if count <= 0:
+        return 0
+    requested = default_jobs if jobs is None else jobs
+    return max(1, min(count, int(requested)))
+
+
+def _map_entries(entries: list[dict[str, Any]], fn, *, jobs: int | None, default_jobs: int = 32) -> tuple[list[dict[str, Any]], int]:
+    workers = _worker_count(len(entries), jobs, default_jobs=default_jobs)
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(fn, entries)), workers
+    return [fn(entry) for entry in entries], workers
+
+
 def _fleet_status_row(entry: dict[str, Any], *, swap: float | None, readiness_timeout: float) -> dict[str, Any]:
+    started = time.perf_counter()
     row = _base_row(entry)
     if not entry.get("ok"):
         return {
@@ -44,6 +65,7 @@ def _fleet_status_row(entry: dict[str, Any], *, swap: float | None, readiness_ti
             "state": "invalid",
             "ready": None,
             "error": entry.get("error"),
+            "elapsed_sec": _elapsed_sec(started),
         }
     try:
         manifest = load_manifest(Path(str(entry["path"])))
@@ -70,11 +92,12 @@ def _fleet_status_row(entry: dict[str, Any], *, swap: float | None, readiness_ti
             "readiness_error": readiness_error,
             "swap_used_gib": None if swap is None else round(swap, 3),
             "service": _service_snapshot(manifest),
+            "elapsed_sec": _elapsed_sec(started),
         }
     except ManifestError as exc:
-        return {**row, "ok": False, "valid": False, "state": "invalid", "ready": None, "error": str(exc)}
+        return {**row, "ok": False, "valid": False, "state": "invalid", "ready": None, "error": str(exc), "elapsed_sec": _elapsed_sec(started)}
     except Exception as exc:
-        return {**row, "ok": False, "valid": False, "state": "error", "ready": None, "error": f"{type(exc).__name__}: {exc}"}
+        return {**row, "ok": False, "valid": False, "state": "error", "ready": None, "error": f"{type(exc).__name__}: {exc}", "elapsed_sec": _elapsed_sec(started)}
 
 
 def fleet_status(
@@ -82,6 +105,7 @@ def fleet_status(
     registries: list[str] | None = None,
     limit: int | None = None,
     readiness_timeout: float = 1.0,
+    jobs: int | None = None,
 ) -> dict[str, Any]:
     """Return an operator snapshot across registered model manifests."""
     listing = list_registry(registries)
@@ -89,24 +113,71 @@ def fleet_status(
     if limit is not None:
         entries = entries[: max(0, limit)]
 
-    rows: list[dict[str, Any]] = []
+    started = time.perf_counter()
     swap = swap_used_gib()
-    if len(entries) > 1:
-        workers = min(32, len(entries))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            rows = list(pool.map(lambda entry: _fleet_status_row(entry, swap=swap, readiness_timeout=readiness_timeout), entries))
-    else:
-        rows = [_fleet_status_row(entry, swap=swap, readiness_timeout=readiness_timeout) for entry in entries]
+    rows, workers = _map_entries(
+        entries,
+        lambda entry: _fleet_status_row(entry, swap=swap, readiness_timeout=readiness_timeout),
+        jobs=jobs,
+    )
 
     states = Counter(str(row.get("state") or "unknown") for row in rows)
     return {
         "ok": True,
         "status": "ok",
         "count": len(rows),
+        "jobs": workers,
+        "elapsed_sec": _elapsed_sec(started),
         "registry_dirs": listing.get("registry_dirs", []),
         "states": dict(sorted(states.items())),
         "models": rows,
     }
+
+
+def _fleet_health_row(
+    entry: dict[str, Any],
+    *,
+    max_swap_gib: float | None,
+    max_swap_delta_gib: float | None,
+    sample_sec: float,
+    include_smoke: bool,
+    max_latency_sec: float | None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    row = _base_row(entry)
+    if not entry.get("ok"):
+        return {
+            **row,
+            "ok": False,
+            "status": "invalid",
+            "issues": ["manifest_invalid"],
+            "warnings": [],
+            "error": entry.get("error"),
+            "elapsed_sec": _elapsed_sec(started),
+        }
+    try:
+        manifest = load_manifest(Path(str(entry["path"])))
+        verdict = health(
+            manifest,
+            max_swap_gib=max_swap_gib,
+            max_swap_delta_gib=max_swap_delta_gib,
+            sample_sec=sample_sec,
+            include_smoke=include_smoke,
+            max_latency_sec=max_latency_sec,
+        )
+        return {
+            **row,
+            "ok": bool(verdict.get("ok")),
+            "status": verdict.get("status"),
+            "issues": verdict.get("issues", []),
+            "warnings": verdict.get("warnings", []),
+            "health": verdict,
+            "elapsed_sec": _elapsed_sec(started),
+        }
+    except ManifestError as exc:
+        return {**row, "ok": False, "status": "invalid", "issues": ["manifest_invalid"], "warnings": [], "error": str(exc), "elapsed_sec": _elapsed_sec(started)}
+    except Exception as exc:
+        return {**row, "ok": False, "status": "critical", "issues": ["health_exception"], "warnings": [], "error": f"{type(exc).__name__}: {exc}", "elapsed_sec": _elapsed_sec(started)}
 
 
 def fleet_health(
@@ -118,6 +189,7 @@ def fleet_health(
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     limit: int | None = None,
+    jobs: int | None = None,
 ) -> dict[str, Any]:
     """Run structured health checks across registered model manifests."""
     listing = list_registry(registries)
@@ -125,41 +197,19 @@ def fleet_health(
     if limit is not None:
         entries = entries[: max(0, limit)]
 
-    rows: list[dict[str, Any]] = []
-    for entry in entries:
-        row = _base_row(entry)
-        if not entry.get("ok"):
-            rows.append({
-                **row,
-                "ok": False,
-                "status": "invalid",
-                "issues": ["manifest_invalid"],
-                "warnings": [],
-                "error": entry.get("error"),
-            })
-            continue
-        try:
-            manifest = load_manifest(Path(str(entry["path"])))
-            verdict = health(
-                manifest,
-                max_swap_gib=max_swap_gib,
-                max_swap_delta_gib=max_swap_delta_gib,
-                sample_sec=sample_sec,
-                include_smoke=include_smoke,
-                max_latency_sec=max_latency_sec,
-            )
-            rows.append({
-                **row,
-                "ok": bool(verdict.get("ok")),
-                "status": verdict.get("status"),
-                "issues": verdict.get("issues", []),
-                "warnings": verdict.get("warnings", []),
-                "health": verdict,
-            })
-        except ManifestError as exc:
-            rows.append({**row, "ok": False, "status": "invalid", "issues": ["manifest_invalid"], "warnings": [], "error": str(exc)})
-        except Exception as exc:
-            rows.append({**row, "ok": False, "status": "critical", "issues": ["health_exception"], "warnings": [], "error": f"{type(exc).__name__}: {exc}"})
+    started = time.perf_counter()
+    rows, workers = _map_entries(
+        entries,
+        lambda entry: _fleet_health_row(
+            entry,
+            max_swap_gib=max_swap_gib,
+            max_swap_delta_gib=max_swap_delta_gib,
+            sample_sec=sample_sec,
+            include_smoke=include_smoke,
+            max_latency_sec=max_latency_sec,
+        ),
+        jobs=jobs,
+    )
 
     counts = Counter(str(row.get("status") or "unknown") for row in rows)
     if not rows:
@@ -168,6 +218,8 @@ def fleet_health(
             "status": "empty",
             "issues": ["no_models"],
             "count": 0,
+            "jobs": workers,
+            "elapsed_sec": _elapsed_sec(started),
             "registry_dirs": listing.get("registry_dirs", []),
             "statuses": {},
             "models": [],
@@ -178,6 +230,8 @@ def fleet_health(
         "status": "ok" if not unhealthy else "critical",
         "issues": [str(row.get("id") or row.get("name") or row.get("path")) for row in unhealthy],
         "count": len(rows),
+        "jobs": workers,
+        "elapsed_sec": _elapsed_sec(started),
         "registry_dirs": listing.get("registry_dirs", []),
         "statuses": dict(sorted(counts.items())),
         "models": rows,
@@ -199,6 +253,7 @@ def fleet_recover(
     readiness_timeout: float = 1.0,
     execute: bool = False,
     wait: bool = False,
+    jobs: int | None = None,
 ) -> dict[str, Any]:
     """Plan or execute safe recovery for down registered model manifests.
 
@@ -217,6 +272,23 @@ def fleet_recover(
             "error": "--execute requires --wait so recovery is readiness-verified",
             "issues": ["execute_requires_wait"],
             "count": 0,
+            "jobs": 0,
+            "elapsed_sec": 0.0,
+            "registry_dirs": listing.get("registry_dirs", []),
+            "planned": {},
+            "models": [],
+        }
+    if execute and jobs is not None and jobs > 1:
+        return {
+            "ok": False,
+            "status": "invalid_request",
+            "executed": False,
+            "wait": wait,
+            "error": "--execute recovery is serial only; omit --jobs or pass --jobs 1",
+            "issues": ["execute_requires_serial_jobs"],
+            "count": 0,
+            "jobs": jobs,
+            "elapsed_sec": 0.0,
             "registry_dirs": listing.get("registry_dirs", []),
             "planned": {},
             "models": [],
@@ -225,12 +297,11 @@ def fleet_recover(
     if limit is not None:
         entries = entries[: max(0, limit)]
 
-    rows: list[dict[str, Any]] = []
-    failures: list[str] = []
-    for entry in entries:
+    def recover_one(entry: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        row_started = time.perf_counter()
         row = _base_row(entry)
         if not entry.get("ok"):
-            rows.append({
+            return ({
                 **row,
                 "ok": False,
                 "valid": False,
@@ -238,8 +309,8 @@ def fleet_recover(
                 "reason": "manifest_invalid",
                 "error": entry.get("error"),
                 "action": {"type": "skip", "reason": "manifest_invalid"},
-            })
-            continue
+                "elapsed_sec": _elapsed_sec(row_started),
+            }, None)
         try:
             manifest = load_manifest(Path(str(entry["path"])))
             before_ready, before_readiness = _readiness_or_error(manifest, readiness_timeout)
@@ -252,33 +323,33 @@ def fleet_recover(
                 "has_start": manifest.start is not None,
             }
             if before_ready:
-                rows.append({
+                return ({
                     **base,
                     "state": "ready",
                     "planned_action": "none",
                     "reason": "already_ready",
                     "action": {"type": "none", "reason": "already_ready"},
-                })
-                continue
+                    "elapsed_sec": _elapsed_sec(row_started),
+                }, None)
             if manifest.start is None:
-                rows.append({
+                return ({
                     **base,
                     "state": "down",
                     "planned_action": "skip",
                     "reason": "no_start_section",
                     "action": {"type": "skip", "reason": "no_start_section"},
-                })
-                continue
+                    "elapsed_sec": _elapsed_sec(row_started),
+                }, None)
 
             if not execute:
-                rows.append({
+                return ({
                     **base,
                     "state": "down",
                     "planned_action": "start",
                     "reason": "not_ready",
                     "action": {"type": "dry_run", "would": "start", "wait": wait},
-                })
-                continue
+                    "elapsed_sec": _elapsed_sec(row_started),
+                }, None)
 
             result = start_model(manifest, wait=wait)
             after_ready, after_readiness = _readiness_or_error(manifest, readiness_timeout)
@@ -287,9 +358,8 @@ def fleet_recover(
                 result_readiness = result.get("readiness")
                 readiness = result_readiness if isinstance(result_readiness, dict) else after_readiness
                 action_ok = action_ok and bool(readiness.get("ready"))
-            if not action_ok:
-                failures.append(str(entry.get("id") or entry.get("name") or entry.get("path")))
-            rows.append({
+            ident = str(entry.get("id") or entry.get("name") or entry.get("path"))
+            return ({
                 **base,
                 "state": "ready" if after_ready else "down",
                 "planned_action": "start",
@@ -297,15 +367,25 @@ def fleet_recover(
                 "action": {"type": "start", "ok": action_ok, "result": result},
                 "after": after_readiness,
                 "pid_after": active_pid(manifest),
-            })
+                "elapsed_sec": _elapsed_sec(row_started),
+            }, None if action_ok else ident)
         except ManifestError as exc:
             ident = str(entry.get("id") or entry.get("name") or entry.get("path"))
-            failures.append(ident)
-            rows.append({**row, "ok": False, "valid": False, "planned_action": "skip", "reason": "manifest_invalid", "error": str(exc), "action": {"type": "skip", "reason": "manifest_invalid"}})
+            return ({**row, "ok": False, "valid": False, "planned_action": "skip", "reason": "manifest_invalid", "error": str(exc), "action": {"type": "skip", "reason": "manifest_invalid"}, "elapsed_sec": _elapsed_sec(row_started)}, ident)
         except Exception as exc:
             ident = str(entry.get("id") or entry.get("name") or entry.get("path"))
-            failures.append(ident)
-            rows.append({**row, "ok": False, "valid": True, "planned_action": "error", "reason": "recover_exception", "error": f"{type(exc).__name__}: {exc}", "action": {"type": "error"}})
+            return ({**row, "ok": False, "valid": True, "planned_action": "error", "reason": "recover_exception", "error": f"{type(exc).__name__}: {exc}", "action": {"type": "error"}, "elapsed_sec": _elapsed_sec(row_started)}, ident)
+
+    started = time.perf_counter()
+    default_jobs = 1 if execute else 32
+    workers = _worker_count(len(entries), jobs, default_jobs=default_jobs)
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(recover_one, entries))
+    else:
+        results = [recover_one(entry) for entry in entries]
+    rows = [row for row, _failure in results]
+    failures = [failure for _row, failure in results if failure is not None]
 
     planned = Counter(str(row.get("planned_action") or "unknown") for row in rows)
     return {
@@ -314,6 +394,8 @@ def fleet_recover(
         "executed": execute,
         "wait": wait,
         "count": len(rows),
+        "jobs": workers,
+        "elapsed_sec": _elapsed_sec(started),
         "registry_dirs": listing.get("registry_dirs", []),
         "planned": dict(sorted(planned.items())),
         "issues": failures,

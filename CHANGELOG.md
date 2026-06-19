@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.17.0
+
+- Add `--jobs` to `modelctl fleet status`, `fleet health`, and dry-run `fleet recover` for bounded concurrent fleet operations.
+- Parallelize `fleet health` scans while preserving registry output order and structured gate semantics.
+- Add per-model and total `elapsed_sec` timing metadata to fleet status, health, and recover outputs.
+
 ## v0.16.0
 
 - Add `modelctl fleet recover` to plan or execute safe starts for registered manifests that are down and have a `[start]` section.

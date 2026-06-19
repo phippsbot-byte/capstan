@@ -109,6 +109,62 @@ class ModelCtlTests(unittest.TestCase):
             self.assertLess(elapsed, 0.45, f"fleet status should not scan readiness serially; elapsed={elapsed:.3f}s")
             self.assertEqual(sorted(calls), [("m0", 0.25), ("m1", 0.25), ("m2", 0.25), ("m3", 0.25)])
 
+    def test_fleet_health_checks_entries_concurrently_with_jobs_and_timing(self):
+        from modelctl import fleet as fleet_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            for idx in range(4):
+                write_registry_manifest(registry, f"h{idx}", f"http://127.0.0.1:{9100 + idx}/v1")
+
+            calls: list[str] = []
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+            original_health = fleet_mod.health
+            original_xdg = os.environ.get("XDG_CONFIG_HOME")
+            original_registry_env = os.environ.get("MODELCTL_REGISTRY")
+
+            def slow_health(manifest, **_kwargs):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.12)
+                with lock:
+                    active -= 1
+                    calls.append(manifest.id)
+                return {"ok": True, "status": "ok", "issues": [], "warnings": []}
+
+            try:
+                fleet_mod.health = slow_health
+                os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                os.environ.pop("MODELCTL_REGISTRY", None)
+                started = time.perf_counter()
+                result = fleet_mod.fleet_health(registries=[str(registry)], jobs=2)
+                elapsed = time.perf_counter() - started
+            finally:
+                fleet_mod.health = original_health
+                if original_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = original_xdg
+                if original_registry_env is None:
+                    os.environ.pop("MODELCTL_REGISTRY", None)
+                else:
+                    os.environ["MODELCTL_REGISTRY"] = original_registry_env
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual([row["id"] for row in result["models"]], ["h0", "h1", "h2", "h3"])
+            self.assertEqual(result["jobs"], 2)
+            self.assertIn("elapsed_sec", result)
+            self.assertLess(elapsed, 0.7, f"fleet health should honor --jobs concurrency; elapsed={elapsed:.3f}s")
+            self.assertEqual(max_active, 2)
+            self.assertEqual(sorted(calls), ["h0", "h1", "h2", "h3"])
+            self.assertTrue(all(row["elapsed_sec"] >= 0 for row in result["models"]))
+
     def write_manifest(self, root: Path, content: str) -> Path:
         path = root / "modelctl.toml"
         path.write_text(textwrap.dedent(content), encoding="utf-8")
@@ -459,14 +515,14 @@ class ModelCtlTests(unittest.TestCase):
                 env.pop("MODELCTL_REGISTRY", None)
                 empty_registry = root / "empty-registry"
                 empty_registry.mkdir()
-                empty = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "health", "--registry", str(empty_registry)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                empty = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "health", "--registry", str(empty_registry), "--jobs", "2"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 self.assertEqual(empty.returncode, 2, empty.stderr + empty.stdout)
                 empty_body = json.loads(empty.stdout)
                 self.assertEqual(empty_body["status"], "empty")
                 self.assertIn("no_models", empty_body["issues"])
 
                 (registry / "bad.toml").write_text("[model\nthis is not toml", encoding="utf-8")
-                result = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "health", "--registry", str(registry), "--max-swap-gib", "999999"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                result = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "health", "--registry", str(registry), "--jobs", "2", "--max-swap-gib", "999999"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
                 self.assertFalse(result.stderr.strip(), result.stderr)
                 body = json.loads(result.stdout)
@@ -482,12 +538,12 @@ class ModelCtlTests(unittest.TestCase):
                 self.assertFalse(rows["down"]["ok"], body)
                 self.assertEqual(rows["down"]["status"], "critical")
                 self.assertIn("readiness", rows["down"]["issues"])
-                pretty = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "fleet", "health", "--registry", str(registry), "--max-swap-gib", "999999"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                pretty = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "fleet", "health", "--registry", str(registry), "--jobs", "2", "--max-swap-gib", "999999"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 self.assertEqual(pretty.returncode, 2, pretty.stderr + pretty.stdout)
                 self.assertIn("healthy", pretty.stdout)
                 self.assertIn("critical", pretty.stdout)
 
-                fleet_status = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "status", "--registry", str(registry), "--readiness-timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                fleet_status = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "status", "--registry", str(registry), "--jobs", "2", "--readiness-timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 self.assertEqual(fleet_status.returncode, 0, fleet_status.stderr + fleet_status.stdout)
                 self.assertFalse(fleet_status.stderr.strip(), fleet_status.stderr)
                 status_body = json.loads(fleet_status.stdout)
@@ -502,7 +558,7 @@ class ModelCtlTests(unittest.TestCase):
                 status_bad = [row for row in status_body["models"] if row.get("name") == "bad"]
                 self.assertEqual(status_bad[0]["state"], "invalid")
                 self.assertIn("service", status_rows["healthy"])
-                pretty_status = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "fleet", "status", "--registry", str(registry), "--readiness-timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                pretty_status = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "fleet", "status", "--registry", str(registry), "--jobs", "2", "--readiness-timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 self.assertEqual(pretty_status.returncode, 0, pretty_status.stderr + pretty_status.stdout)
                 self.assertIn("ready", pretty_status.stdout)
                 self.assertIn("invalid", pretty_status.stdout)
@@ -576,7 +632,7 @@ class ModelCtlTests(unittest.TestCase):
             env = os.environ.copy()
             env["XDG_CONFIG_HOME"] = str(root / "xdg-config")
             env.pop("MODELCTL_REGISTRY", None)
-            cmd = [sys.executable, "-m", "modelctl.cli", "fleet", "recover", "--registry", str(registry), "--readiness-timeout", "1"]
+            cmd = [sys.executable, "-m", "modelctl.cli", "fleet", "recover", "--registry", str(registry), "--jobs", "1", "--readiness-timeout", "1"]
 
             dry = subprocess.run(cmd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(dry.returncode, 0, dry.stderr + dry.stdout)
@@ -595,6 +651,13 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(no_wait_body["status"], "invalid_request")
             self.assertIn("execute_requires_wait", no_wait_body["issues"])
             self.assertFalse((root / "recover.pid.json").exists(), "execute without wait must not start processes")
+
+            unsafe_parallel = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "recover", "--registry", str(registry), "--jobs", "2", "--readiness-timeout", "1", "--execute", "--wait"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(unsafe_parallel.returncode, 2, unsafe_parallel.stderr + unsafe_parallel.stdout)
+            unsafe_body = json.loads(unsafe_parallel.stdout)
+            self.assertEqual(unsafe_body["status"], "invalid_request")
+            self.assertIn("execute_requires_serial_jobs", unsafe_body["issues"])
+            self.assertFalse((root / "recover.pid.json").exists(), "parallel execute recovery must not start processes")
 
             executed = subprocess.run(cmd + ["--execute", "--wait"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(executed.returncode, 0, executed.stderr + executed.stdout)
