@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,53 @@ def _service_snapshot(manifest) -> dict[str, Any]:
     return {"label": label, "plist_path": str(plist_path), "plist_exists": exists, "managed": exists}
 
 
+def _readiness_timeout(timeout: float) -> float:
+    return max(0.001, float(timeout))
+
+
+def _fleet_status_row(entry: dict[str, Any], *, swap: float | None, readiness_timeout: float) -> dict[str, Any]:
+    row = _base_row(entry)
+    if not entry.get("ok"):
+        return {
+            **row,
+            "ok": False,
+            "valid": False,
+            "state": "invalid",
+            "ready": None,
+            "error": entry.get("error"),
+        }
+    try:
+        manifest = load_manifest(Path(str(entry["path"])))
+        pid = active_pid(manifest)
+        try:
+            readiness = readiness_check(manifest, timeout=_readiness_timeout(readiness_timeout))
+            readiness_error = None
+        except Exception as exc:
+            readiness = {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
+            readiness_error = readiness["error"]
+        ready = bool(readiness.get("ready"))
+        return {
+            **row,
+            "ok": True,
+            "valid": True,
+            "state": "ready" if ready else "down",
+            "ready": ready,
+            "pid": pid,
+            "pid_path": str(default_pid_path(manifest)),
+            "pid_state": read_pid_state(manifest),
+            "log_path": str(default_log_path(manifest)),
+            "has_start": manifest.start is not None,
+            "readiness": readiness,
+            "readiness_error": readiness_error,
+            "swap_used_gib": None if swap is None else round(swap, 3),
+            "service": _service_snapshot(manifest),
+        }
+    except ManifestError as exc:
+        return {**row, "ok": False, "valid": False, "state": "invalid", "ready": None, "error": str(exc)}
+    except Exception as exc:
+        return {**row, "ok": False, "valid": False, "state": "error", "ready": None, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def fleet_status(
     *,
     registries: list[str] | None = None,
@@ -43,48 +91,12 @@ def fleet_status(
 
     rows: list[dict[str, Any]] = []
     swap = swap_used_gib()
-    for entry in entries:
-        row = _base_row(entry)
-        if not entry.get("ok"):
-            rows.append({
-                **row,
-                "ok": False,
-                "valid": False,
-                "state": "invalid",
-                "ready": None,
-                "error": entry.get("error"),
-            })
-            continue
-        try:
-            manifest = load_manifest(Path(str(entry["path"])))
-            pid = active_pid(manifest)
-            try:
-                readiness = readiness_check(manifest, timeout=max(1, int(readiness_timeout)))
-                readiness_error = None
-            except Exception as exc:
-                readiness = {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
-                readiness_error = readiness["error"]
-            ready = bool(readiness.get("ready"))
-            rows.append({
-                **row,
-                "ok": True,
-                "valid": True,
-                "state": "ready" if ready else "down",
-                "ready": ready,
-                "pid": pid,
-                "pid_path": str(default_pid_path(manifest)),
-                "pid_state": read_pid_state(manifest),
-                "log_path": str(default_log_path(manifest)),
-                "has_start": manifest.start is not None,
-                "readiness": readiness,
-                "readiness_error": readiness_error,
-                "swap_used_gib": None if swap is None else round(swap, 3),
-                "service": _service_snapshot(manifest),
-            })
-        except ManifestError as exc:
-            rows.append({**row, "ok": False, "valid": False, "state": "invalid", "ready": None, "error": str(exc)})
-        except Exception as exc:
-            rows.append({**row, "ok": False, "valid": False, "state": "error", "ready": None, "error": f"{type(exc).__name__}: {exc}"})
+    if len(entries) > 1:
+        workers = min(32, len(entries))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            rows = list(pool.map(lambda entry: _fleet_status_row(entry, swap=swap, readiness_timeout=readiness_timeout), entries))
+    else:
+        rows = [_fleet_status_row(entry, swap=swap, readiness_timeout=readiness_timeout) for entry in entries]
 
     states = Counter(str(row.get("state") or "unknown") for row in rows)
     return {
@@ -174,7 +186,7 @@ def fleet_health(
 
 def _readiness_or_error(manifest, timeout: float) -> tuple[bool, dict[str, Any]]:
     try:
-        readiness = readiness_check(manifest, timeout=max(1, int(timeout)))
+        readiness = readiness_check(manifest, timeout=_readiness_timeout(timeout))
         return bool(readiness.get("ready")), readiness
     except Exception as exc:
         return False, {"ready": False, "error": f"{type(exc).__name__}: {exc}"}

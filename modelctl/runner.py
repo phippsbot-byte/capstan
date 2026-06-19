@@ -53,7 +53,7 @@ def active_pid(manifest: ModelManifest) -> int | None:
     return None
 
 
-def readiness_check(manifest: ModelManifest, timeout: int = 10) -> dict[str, Any]:
+def readiness_check(manifest: ModelManifest, timeout: float = 10.0) -> dict[str, Any]:
     url = manifest.start.readiness_url if manifest.start and manifest.start.readiness_url else manifest.models_url
     contains = manifest.start.readiness_contains if manifest.start else manifest.model_id
     status, body, text = http_json("GET", url, timeout=timeout)

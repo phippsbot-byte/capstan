@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 
 
-def http_json(method: str, url: str, payload: dict[str, Any] | None = None, timeout: int = 30) -> tuple[int, Any, str]:
+def http_json(method: str, url: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> tuple[int, Any, str]:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())

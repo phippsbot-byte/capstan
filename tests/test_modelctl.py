@@ -19,6 +19,17 @@ from modelctl.ops import cleanup_execute, cleanup_plan, preflight
 from modelctl.system import pid_alive
 
 
+def write_registry_manifest(registry: Path, name: str, endpoint: str) -> Path:
+    path = registry / f"{name}.toml"
+    path.write_text(textwrap.dedent(f'''
+        [model]
+        id = "{name}"
+        model_id = "{name}-model"
+        endpoint = "{endpoint}"
+    '''), encoding="utf-8")
+    return path
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -26,6 +37,78 @@ def free_port() -> int:
 
 
 class ModelCtlTests(unittest.TestCase):
+    def test_version_command_avoids_runtime_module_imports(self):
+        probe = textwrap.dedent('''
+            import contextlib, io, json, sys
+            from modelctl import cli
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cli.main(["version"])
+            names = ["modelctl.manifest", "modelctl.ops", "modelctl.fleet", "modelctl.runner", "urllib.request"]
+            print(json.dumps({"rc": rc, "out": json.loads(out.getvalue()), "modules": {name: name in sys.modules for name in names}}))
+        ''')
+        result = subprocess.run([sys.executable, "-c", probe], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        body = json.loads(result.stdout)
+        self.assertEqual(body["rc"], 0, body)
+        self.assertRegex(body["out"]["version"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(body["modules"], {"modelctl.manifest": False, "modelctl.ops": False, "modelctl.fleet": False, "modelctl.runner": False, "urllib.request": False})
+
+    def test_fleet_status_checks_entries_concurrently_and_preserves_float_timeout(self):
+        from modelctl import fleet as fleet_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            for idx in range(4):
+                write_registry_manifest(registry, f"m{idx}", f"http://127.0.0.1:{9000 + idx}/v1")
+
+            calls: list[tuple[str, float]] = []
+            original_readiness = fleet_mod.readiness_check
+            original_active_pid = fleet_mod.active_pid
+            original_pid_state = fleet_mod.read_pid_state
+            original_service = fleet_mod._service_snapshot
+            original_swap = fleet_mod.swap_used_gib
+            original_xdg = os.environ.get("XDG_CONFIG_HOME")
+            original_registry_env = os.environ.get("MODELCTL_REGISTRY")
+
+            def slow_readiness(manifest, timeout=10):
+                time.sleep(0.2)
+                calls.append((manifest.id, timeout))
+                return {"ready": False, "status": 599, "url": manifest.models_url}
+
+            try:
+                fleet_mod.readiness_check = slow_readiness
+                fleet_mod.active_pid = lambda _manifest: None
+                fleet_mod.read_pid_state = lambda _manifest: None
+                fleet_mod._service_snapshot = lambda manifest: {"label": f"ai.modelctl.{manifest.id}", "managed": False}
+                fleet_mod.swap_used_gib = lambda: 0.0
+                os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                os.environ.pop("MODELCTL_REGISTRY", None)
+                started = time.perf_counter()
+                result = fleet_mod.fleet_status(registries=[str(registry)], readiness_timeout=0.25)
+                elapsed = time.perf_counter() - started
+            finally:
+                fleet_mod.readiness_check = original_readiness
+                fleet_mod.active_pid = original_active_pid
+                fleet_mod.read_pid_state = original_pid_state
+                fleet_mod._service_snapshot = original_service
+                fleet_mod.swap_used_gib = original_swap
+                if original_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = original_xdg
+                if original_registry_env is None:
+                    os.environ.pop("MODELCTL_REGISTRY", None)
+                else:
+                    os.environ["MODELCTL_REGISTRY"] = original_registry_env
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual([row["id"] for row in result["models"]], ["m0", "m1", "m2", "m3"])
+            self.assertLess(elapsed, 0.45, f"fleet status should not scan readiness serially; elapsed={elapsed:.3f}s")
+            self.assertEqual(sorted(calls), [("m0", 0.25), ("m1", 0.25), ("m2", 0.25), ("m3", 0.25)])
+
     def write_manifest(self, root: Path, content: str) -> Path:
         path = root / "modelctl.toml"
         path.write_text(textwrap.dedent(content), encoding="utf-8")

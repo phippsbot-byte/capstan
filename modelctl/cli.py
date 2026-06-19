@@ -4,18 +4,6 @@ import argparse
 import json
 import sys
 
-from .bench_artifacts import write_bench_artifact
-from .fleet import fleet_health, fleet_recover, fleet_status
-from .init import init_manifest
-from .ingest import ingest
-from .manifest import ManifestError, load_manifest
-from .mlx import create_overlay, discover_mlx_models, inspect_mlx_model, write_mlx_manifest
-from .ops import bench, cleanup_execute, cleanup_plan, daemon, doctor, doctor_fix, health, preflight, smoke, soak, status, validate, watchdog
-from .registry import add_registry, list_registry, remove_registry, show_registry, use_registry
-from .report import write_report
-from .report_store import list_reports, save_report, show_report
-from .runner import start, stop, wait_ready
-from .service import ServiceError, diff_service, install_service, service_action
 from . import __version__
 
 PRETTY = False
@@ -306,10 +294,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "version":
             emit({"version": __version__}); return 0
         if args.command == "init":
+            from .init import init_manifest
             result = init_manifest(output=args.output, template=args.template, model_id=args.model_id, endpoint=args.endpoint, ident=args.ident, port=args.port, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
         if args.command == "list":
+            from .registry import list_registry
             emit(list_registry(args.registry)); return 0
         if args.command == "registry":
+            from .registry import add_registry, list_registry, remove_registry, show_registry, use_registry
             if args.registry_command == "list":
                 emit(list_registry(args.registry)); return 0
             if args.registry_command == "add":
@@ -321,14 +312,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.registry_command == "use":
                 result = use_registry(args.name, output=args.output, registry_dir=args.registry, overwrite=args.overwrite, symlink=args.symlink); emit(result); return 0 if result.get("ok") else 2
         if args.command == "reports":
+            from .report_store import list_reports, save_report, show_report
             if args.reports_command == "list":
                 result = list_reports(model=args.model); emit(result); return 0 if result.get("ok") else 2
             if args.reports_command == "show":
                 result = show_report(args.report_id); emit(result); return 0 if result.get("ok") else 2
             if args.reports_command == "save":
+                from .manifest import load_manifest
                 manifest = load_manifest(args.manifest)
                 result = save_report(manifest, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
         if args.command == "fleet":
+            from .fleet import fleet_health, fleet_recover, fleet_status
             if args.fleet_command == "status":
                 result = fleet_status(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout); emit(result); return 0
             if args.fleet_command == "health":
@@ -336,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.fleet_command == "recover":
                 result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait); emit(result); return 0 if result.get("ok") else 2
         if args.command == "mlx":
+            from .mlx import create_overlay, discover_mlx_models, inspect_mlx_model, write_mlx_manifest
             if args.mlx_command == "discover":
                 result = discover_mlx_models(root=args.root, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
             if args.mlx_command == "inspect":
@@ -345,10 +340,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.mlx_command == "manifest":
                 result = write_mlx_manifest(args.model_path, output=args.output, overwrite=args.overwrite, model_id=args.model_id, ident=args.ident, port=args.port, python=args.python, max_tokens=args.max_tokens, temp=args.temp, top_p=args.top_p, prompt_cache_gib=args.prompt_cache_gib); emit(result); return 0 if result.get("ok") else 2
         if args.command == "ingest":
+            from .ingest import ingest
             result = ingest(args.endpoint, output=args.output, model_id=args.model_id, ident=args.ident, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
         if args.command not in MANIFEST_COMMANDS:
             parser.error("unknown command")
+        from .manifest import load_manifest
         manifest = load_manifest(args.manifest)
+        from .ops import bench, cleanup_execute, cleanup_plan, daemon, doctor, doctor_fix, health, preflight, smoke, soak, status, validate, watchdog
+        from .runner import start, stop, wait_ready
         if args.command == "validate":
             emit(validate(manifest)); return 0
         if args.command == "preflight":
@@ -366,12 +365,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             result = doctor_fix(manifest) if args.fix else doctor(manifest); emit(result); return 0 if result.get("ok") else 2
         if args.command == "report":
+            from .report import write_report
             result = write_report(manifest, output=args.output, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
         if args.command == "smoke":
             result = smoke(manifest, prompt=args.prompt, expect=args.expect, max_tokens=args.max_tokens, temperature=args.temperature); emit(result); return 0 if result.get("ok") else 2
         if args.command == "soak":
             result = soak(manifest, count=args.count, delay_sec=args.delay, fail_fast=not args.no_fail_fast); emit(result); return 0 if result.get("ok") else 2
         if args.command == "bench":
+            from .bench_artifacts import write_bench_artifact
             prompt_chars = args.prompt_chars or BENCH_PRESETS[args.preset]
             result = bench(manifest, prompt_chars=prompt_chars, repeats=args.repeats, max_tokens=args.max_tokens)
             artifact = write_bench_artifact(manifest, result, output=args.output, fmt=args.format)
@@ -383,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec > 0 or args.smoke or args.max_latency_sec is not None)
             result = daemon(manifest, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=daemon_health_mode, interval_sec=args.interval, iterations=args.iterations, restart=args.restart, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
         if args.command == "service":
+            from .service import diff_service, install_service, service_action
             if args.service_command == "install":
                 service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec > 0 or args.smoke or args.max_latency_sec is not None)
                 result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
@@ -392,13 +394,13 @@ def main(argv: list[str] | None = None) -> int:
             result = service_action(manifest, args.service_command, label=args.label, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "cleanup":
             emit(cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)); return 0
-    except ManifestError as exc:
-        print(f"manifest error: {exc}", file=sys.stderr); return 2
-    except ServiceError as exc:
-        print(f"service error: {exc}", file=sys.stderr); return 2
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr); return 130
     except Exception as exc:
+        if exc.__class__.__name__ == "ManifestError" and exc.__class__.__module__ == "modelctl.manifest":
+            print(f"manifest error: {exc}", file=sys.stderr); return 2
+        if exc.__class__.__name__ == "ServiceError" and exc.__class__.__module__ == "modelctl.service":
+            print(f"service error: {exc}", file=sys.stderr); return 2
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr); return 1
     parser.error("unknown command")
     return 2
