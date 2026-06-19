@@ -139,7 +139,7 @@ def _fleet_health_row(
     *,
     max_swap_gib: float | None,
     max_swap_delta_gib: float | None,
-    sample_sec: float,
+    sample_sec: float | None,
     include_smoke: bool,
     max_latency_sec: float | None,
 ) -> dict[str, Any]:
@@ -185,7 +185,7 @@ def fleet_health(
     registries: list[str] | None = None,
     max_swap_gib: float | None = None,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     limit: int | None = None,

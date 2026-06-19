@@ -59,15 +59,15 @@ modelctl report --format md --output report.md
 modelctl reports save --format json
 modelctl reports list
 modelctl fleet status
-modelctl fleet health --max-swap-delta-gib 1 --sample-sec 5
+modelctl fleet health
 modelctl fleet recover             # dry-run recovery plan
 modelctl fleet recover --execute --wait
 modelctl doctor --fix
-modelctl health --max-swap-delta-gib 1 --sample-sec 5
-modelctl daemon --health-mode --iterations 1 --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5
-modelctl service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --dry-run
-modelctl service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120 --overwrite
-modelctl service diff --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
+modelctl health
+modelctl daemon --iterations 1
+modelctl service install --restart --interval 120 --dry-run
+modelctl service install --restart --interval 120 --overwrite
+modelctl service diff --restart --interval 120
 modelctl service start
 modelctl service status
 modelctl watchdog --max-swap-gib 4 --duration 0
@@ -104,7 +104,15 @@ DSV4_FLASH_THREADS_HTTP = "4"
 [preflight]
 required_paths = ["$HOME/LLM/ssd-streaming/run-dsv4-flash-ssd-server-candidate.sh"]
 exclusive_ports = [8127]
-max_swap_gib = 4
+max_swap_gib = 128
+
+[health]
+max_swap_gib = 128
+max_swap_delta_gib = 1
+sample_sec = 5
+smoke = true
+max_latency_sec = 180
+max_io_latency_sec = 25
 
 [[preflight.disk]]
 path = "$HOME"
@@ -141,7 +149,7 @@ safe = true
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
-- `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, and optional smoke latency.
+- `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults.
 - `doctor --fix` — run diagnostics and apply safe local repairs like stale PID-state removal and state-dir creation.
 - `report --format md --output report.md` — write JSON/Markdown model state reports.
 - `reports save/list/show` — keep/query saved report history under the modelctl state directory.

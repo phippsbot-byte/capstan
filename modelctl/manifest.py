@@ -56,6 +56,16 @@ class SmokeConfig:
 
 
 @dataclass(slots=True)
+class HealthConfig:
+    max_swap_gib: float | None = None
+    max_swap_delta_gib: float | None = None
+    sample_sec: float = 0.0
+    smoke: bool = False
+    max_latency_sec: float | None = None
+    max_io_latency_sec: float | None = None
+
+
+@dataclass(slots=True)
 class PreflightConfig:
     required_paths: list[str] = field(default_factory=list)
     exclusive_ports: list[int] = field(default_factory=list)
@@ -72,6 +82,7 @@ class ModelManifest:
     description: str = ""
     start: StartConfig | None = None
     preflight: PreflightConfig = field(default_factory=PreflightConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
     smoke: SmokeConfig = field(default_factory=SmokeConfig)
     cleanup: list[CleanupCandidate] = field(default_factory=list)
 
@@ -169,13 +180,28 @@ def load_manifest(path: str | Path) -> ModelManifest:
         disk=disk_checks,
     )
 
-    smoke_raw = _as_table(data, "smoke") if "smoke" in data else {}
+    health_raw = _as_table(data, "health") if "health" in data else {}
+    health = HealthConfig(
+        max_swap_gib=float(health_raw["max_swap_gib"]) if "max_swap_gib" in health_raw else None,
+        max_swap_delta_gib=float(health_raw["max_swap_delta_gib"]) if "max_swap_delta_gib" in health_raw else None,
+        sample_sec=float(health_raw.get("sample_sec", 0.0)),
+        smoke=bool(health_raw.get("smoke", False)),
+        max_latency_sec=float(health_raw["max_latency_sec"]) if "max_latency_sec" in health_raw else None,
+        max_io_latency_sec=float(health_raw["max_io_latency_sec"]) if "max_io_latency_sec" in health_raw else None,
+    )
+
+    has_smoke = "smoke" in data
+    smoke_raw = _as_table(data, "smoke") if has_smoke else {}
+    smoke_defaults = SmokeConfig()
+    smoke_expect = "pong" if not has_smoke else None
+    if "expect" in smoke_raw and smoke_raw.get("expect") is not None:
+        smoke_expect = str(smoke_raw["expect"])
     smoke = SmokeConfig(
-        prompt=str(smoke_raw.get("prompt", SmokeConfig.prompt)),
-        expect=(None if smoke_raw.get("expect") is None else str(smoke_raw.get("expect", SmokeConfig.expect))),
-        max_tokens=int(smoke_raw.get("max_tokens", 32)),
-        temperature=float(smoke_raw.get("temperature", 0.0)),
-        timeout_sec=int(smoke_raw.get("timeout_sec", 300)),
+        prompt=str(smoke_raw.get("prompt", smoke_defaults.prompt)),
+        expect=smoke_expect,
+        max_tokens=int(smoke_raw.get("max_tokens", smoke_defaults.max_tokens)),
+        temperature=float(smoke_raw.get("temperature", smoke_defaults.temperature)),
+        timeout_sec=int(smoke_raw.get("timeout_sec", smoke_defaults.timeout_sec)),
     )
 
     cleanup: list[CleanupCandidate] = []
@@ -186,4 +212,4 @@ def load_manifest(path: str | Path) -> ModelManifest:
             raise ManifestError("[[cleanup]] requires path")
         cleanup.append(CleanupCandidate(path=expand(str(row["path"])) or "", description=str(row.get("description", "")), safe=bool(row.get("safe", False))))
 
-    return ModelManifest(path=p, id=ident, model_id=model_id, endpoint=endpoint, description=str(model.get("description", "")), start=start_cfg, preflight=preflight, smoke=smoke, cleanup=cleanup)
+    return ModelManifest(path=p, id=ident, model_id=model_id, endpoint=endpoint, description=str(model.get("description", "")), start=start_cfg, preflight=preflight, health=health, smoke=smoke, cleanup=cleanup)

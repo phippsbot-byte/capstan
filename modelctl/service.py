@@ -64,13 +64,33 @@ def _fmt_number(value: float | int) -> str:
     return str(value)
 
 
+def _effective_health_options(
+    manifest: ModelManifest,
+    *,
+    max_swap_gib: float | None = None,
+    max_swap_delta_gib: float | None = None,
+    sample_sec: float | None = None,
+    include_smoke: bool = False,
+    max_latency_sec: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "max_swap_gib": max_swap_gib if max_swap_gib is not None else (manifest.health.max_swap_gib if manifest.health.max_swap_gib is not None else manifest.preflight.max_swap_gib),
+        "max_swap_delta_gib": max_swap_delta_gib if max_swap_delta_gib is not None else manifest.health.max_swap_delta_gib,
+        "sample_sec": sample_sec if sample_sec is not None else manifest.health.sample_sec,
+        "include_smoke": bool(include_smoke or manifest.health.smoke),
+        "max_latency_sec": max_latency_sec if max_latency_sec is not None else manifest.health.max_latency_sec,
+        "max_io_latency_sec": manifest.health.max_io_latency_sec,
+        "sample_sec_explicit": sample_sec is not None,
+    }
+
+
 def daemon_program_arguments(
     manifest: ModelManifest,
     *,
     restart: bool = False,
     max_swap_gib: float | None = None,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     health_mode: bool = False,
@@ -90,20 +110,39 @@ def daemon_program_arguments(
         "--interval",
         _fmt_number(interval_sec),
     ]
-    effective_health_mode = bool(health_mode or max_swap_delta_gib is not None or sample_sec or include_smoke or max_latency_sec is not None)
+    options = _effective_health_options(
+        manifest,
+        max_swap_gib=max_swap_gib,
+        max_swap_delta_gib=max_swap_delta_gib,
+        sample_sec=sample_sec,
+        include_smoke=include_smoke,
+        max_latency_sec=max_latency_sec,
+    )
+    ceiling = options["max_swap_gib"]
+    effective_delta = options["max_swap_delta_gib"]
+    effective_sample = float(options["sample_sec"] or 0.0)
+    effective_smoke = bool(options["include_smoke"])
+    effective_latency = options["max_latency_sec"]
+    effective_health_mode = bool(
+        health_mode
+        or effective_delta is not None
+        or effective_sample > 0
+        or effective_smoke
+        or effective_latency is not None
+        or options["max_io_latency_sec"] is not None
+    )
     if effective_health_mode:
         args.append("--health-mode")
-    ceiling = max_swap_gib if max_swap_gib is not None else manifest.preflight.max_swap_gib
     if ceiling is not None:
         args.extend(["--max-swap-gib", _fmt_number(ceiling)])
-    if effective_health_mode and max_swap_delta_gib is not None:
-        args.extend(["--max-swap-delta-gib", _fmt_number(max_swap_delta_gib)])
-    if effective_health_mode and sample_sec:
-        args.extend(["--sample-sec", _fmt_number(sample_sec)])
-    if effective_health_mode and include_smoke:
+    if effective_health_mode and effective_delta is not None:
+        args.extend(["--max-swap-delta-gib", _fmt_number(effective_delta)])
+    if effective_health_mode and (options["sample_sec_explicit"] or effective_sample > 0):
+        args.extend(["--sample-sec", _fmt_number(effective_sample)])
+    if effective_health_mode and effective_smoke:
         args.append("--smoke")
-    if effective_health_mode and max_latency_sec is not None:
-        args.extend(["--max-latency-sec", _fmt_number(max_latency_sec)])
+    if effective_health_mode and effective_latency is not None:
+        args.extend(["--max-latency-sec", _fmt_number(effective_latency)])
     if restart:
         args.append("--restart")
     if not wait:
@@ -118,7 +157,7 @@ def render_launchd_plist(
     restart: bool = False,
     max_swap_gib: float | None = None,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     health_mode: bool = False,
@@ -189,7 +228,7 @@ def diff_service(
     restart: bool = False,
     max_swap_gib: float | None = None,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     health_mode: bool = False,
@@ -269,7 +308,7 @@ def install_service(
     restart: bool = False,
     max_swap_gib: float | None = None,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     health_mode: bool = False,

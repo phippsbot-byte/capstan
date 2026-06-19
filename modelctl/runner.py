@@ -95,8 +95,8 @@ def start(manifest: ModelManifest, wait: bool = False) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(manifest.start.env)
     cwd = manifest.start.cwd or str(manifest.path.parent)
-    log = log_path.open("ab", buffering=0)
-    proc = subprocess.Popen(manifest.start.command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    with log_path.open("ab", buffering=0) as log:
+        proc = subprocess.Popen(manifest.start.command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     state = {"pid": proc.pid, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "command": manifest.start.command, "cwd": cwd, "log_path": str(log_path), "manifest": str(manifest.path)}
     pid_path = write_pid_state(manifest, state)
     result = {"started": True, "pid": proc.pid, "pid_path": str(pid_path), "log_path": str(log_path)}

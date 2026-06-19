@@ -200,7 +200,7 @@ def _default_python() -> str:
     return str(homebrew) if homebrew.exists() else "python3.11"
 
 
-def mlx_manifest_text(model_path: str | Path, model_id: str | None = None, ident: str | None = None, port: int = 8080, python: str | None = None, max_tokens: int = 4096, temp: float = 0.23, top_p: float = 0.9, prompt_cache_gib: float = 4.0) -> str:
+def mlx_manifest_text(model_path: str | Path, model_id: str | None = None, ident: str | None = None, port: int = 8080, python: str | None = None, max_tokens: int = 4096, temp: float = 0.23, top_p: float = 0.9, prompt_cache_gib: float = 4.0, prompt_cache_size: int = 4) -> str:
     model = _model_dir(model_path)
     request_model_id = model_id or "default_model"
     allowed_request_ids = {"default_model", str(model)}
@@ -235,7 +235,7 @@ def mlx_manifest_text(model_path: str | Path, model_id: str | None = None, ident
         "--prompt-concurrency",
         "1",
         "--prompt-cache-size",
-        "4",
+        str(prompt_cache_size),
         "--prompt-cache-bytes",
         str(prompt_cache_bytes),
         "--log-level",
@@ -261,6 +261,11 @@ readiness_contains = {_q(str(model))}
 required_paths = [{_q(str(model))}]
 exclusive_ports = [{port}]
 max_swap_gib = 8
+
+[health]
+max_swap_gib = 8
+max_swap_delta_gib = 1
+sample_sec = 5
 
 [[preflight.disk]]
 path = {_q(str(model.parent))}

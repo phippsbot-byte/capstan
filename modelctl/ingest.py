@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import json
+import urllib.error
 
 from .http import http_json
 from .manifest import load_manifest
@@ -65,7 +66,10 @@ temperature = 0
 
 def ingest(endpoint: str, output: str | None = None, model_id: str | None = None, ident: str | None = None, overwrite: bool = False, timeout: int = 30) -> dict[str, Any]:
     models_url = _models_url(endpoint)
-    status, body, text = http_json("GET", models_url, timeout=timeout)
+    try:
+        status, body, text = http_json("GET", models_url, timeout=timeout)
+    except (urllib.error.URLError, ValueError) as exc:
+        return {"ok": False, "status": None, "models_url": models_url, "error": f"{type(exc).__name__}: {exc}"}
     if not (200 <= status < 300):
         return {"ok": False, "status": status, "models_url": models_url, "error": body}
     names = _model_names(body)

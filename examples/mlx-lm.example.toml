@@ -18,6 +18,11 @@ required_paths = ["$HOME/.cache/mlx-models/my-qwen-model-served"]
 exclusive_ports = [8123]
 max_swap_gib = 8
 
+[health]
+max_swap_gib = 8
+max_swap_delta_gib = 1
+sample_sec = 5
+
 [[preflight.disk]]
 path = "$HOME/.cache/mlx-models"
 min_free_gib = 5

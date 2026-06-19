@@ -227,6 +227,201 @@ class ModelCtlTests(unittest.TestCase):
             result = preflight(manifest)
             self.assertTrue(result["ok"], result)
 
+    def test_manifest_health_table_drives_health_wait_daemon_and_service_defaults(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+                def _send(self, body, status=200):
+                    data = json.dumps(body).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                def do_GET(self):
+                    if self.path == "/v1/models":
+                        self._send({"object": "list", "data": [{"id": "nostart-model"}]})
+                    else:
+                        self._send({"error": "not found"}, 404)
+                def do_POST(self):
+                    if self.path == "/v1/chat/completions":
+                        self._send({"choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}]})
+                    else:
+                        self._send({"error": "not found"}, 404)
+
+            server = HTTPServer(("127.0.0.1", 0), H)
+            port = int(server.server_address[1])
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            self.addCleanup(lambda: thread.join(timeout=5))
+
+            probe_file = root / "probe.bin"
+            probe_file.write_bytes(b"probe" * 1024)
+            manifest_path = self.write_manifest(root, f'''
+                [model]
+                id = "nostart"
+                model_id = "nostart-model"
+                endpoint = "http://127.0.0.1:{port}/v1"
+
+                [preflight]
+                required_paths = ["{probe_file}"]
+
+                [health]
+                max_swap_gib = 999999
+                max_swap_delta_gib = 999999
+                sample_sec = 0.001
+                smoke = true
+                max_latency_sec = 10
+                max_io_latency_sec = 25
+
+                [smoke]
+                prompt = "Reply with exactly the word pong."
+                expect = "pong"
+                max_tokens = 8
+            ''')
+            manifest = load_manifest(manifest_path)
+            self.assertEqual(manifest.health.max_swap_gib, 999999)
+            self.assertEqual(manifest.health.max_io_latency_sec, 25)
+
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
+            wait = subprocess.run(cmd + ["wait", "--timeout", "1"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(wait.returncode, 0, wait.stderr + wait.stdout)
+            wait_body = json.loads(wait.stdout)
+            self.assertTrue(wait_body["ready"], wait_body)
+
+            health = subprocess.run(cmd + ["health"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(health.returncode, 0, health.stderr + health.stdout)
+            health_body = json.loads(health.stdout)
+            self.assertTrue(health_body["ok"], health_body)
+            self.assertEqual(health_body["checks"]["swap"]["max_swap_delta_gib"], 999999)
+            self.assertEqual(health_body["checks"]["swap"]["sample_sec"], 0.001)
+            self.assertEqual(health_body["checks"]["smoke"]["status"], "ok")
+            self.assertEqual(health_body["checks"]["io"]["status"], "ok")
+            self.assertEqual(health_body["checks"]["io"]["max_io_latency_sec"], 25)
+
+            daemon = subprocess.run(cmd + ["daemon", "--iterations", "1", "--interval", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(daemon.returncode, 0, daemon.stderr + daemon.stdout)
+            daemon_body = json.loads(daemon.stdout)
+            self.assertTrue(daemon_body["health_mode"], daemon_body)
+            self.assertTrue(daemon_body["include_smoke"], daemon_body)
+            self.assertEqual(daemon_body["max_swap_delta_gib"], 999999)
+
+            env = os.environ.copy()
+            env["MODELCTL_LAUNCHD_DIR"] = str(root / "LaunchAgents")
+            svc = subprocess.run(cmd + ["service", "install", "--dry-run", "--interval", "7"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(svc.returncode, 0, svc.stderr + svc.stdout)
+            svc_body = json.loads(svc.stdout)
+            args = svc_body["program_arguments"]
+            self.assertIn("--health-mode", args)
+            self.assertIn("--max-swap-gib", args)
+            self.assertIn("999999", args)
+            self.assertIn("--max-swap-delta-gib", args)
+            self.assertIn("--sample-sec", args)
+            self.assertIn("0.001", args)
+            self.assertIn("--smoke", args)
+            self.assertIn("--max-latency-sec", args)
+            self.assertIn("10", args)
+
+    def test_smoke_custom_prompt_without_expect_is_not_forced_to_pong(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            default_path = self.write_manifest(root, '''
+                [model]
+                id = "default-smoke"
+                model_id = "default-model"
+                endpoint = "http://127.0.0.1:9/v1"
+            ''')
+            self.assertEqual(load_manifest(default_path).smoke.expect, "pong")
+
+            manifest_path = self.write_manifest(root, '''
+                [model]
+                id = "loose-smoke"
+                model_id = "loose-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [smoke]
+                prompt = "Say hello."
+                max_tokens = 8
+            ''')
+            manifest = load_manifest(manifest_path)
+            self.assertIsNone(manifest.smoke.expect)
+
+            strict_path = self.write_manifest(root, '''
+                [model]
+                id = "strict-smoke"
+                model_id = "strict-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [smoke]
+                prompt = "Reply with exactly the word pong."
+                expect = "pong"
+            ''')
+            strict_manifest = load_manifest(strict_path)
+            from modelctl import ops as ops_mod
+            original_http_json = ops_mod.http_json
+            try:
+                ops_mod.http_json = lambda *_args, **_kwargs: (200, {"choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}]}, "")
+                overridden = ops_mod.smoke(strict_manifest, prompt="Say hello.")
+            finally:
+                ops_mod.http_json = original_http_json
+            self.assertTrue(overridden["ok"], overridden)
+            self.assertIsNone(overridden["expect"])
+            self.assertIsNone(overridden["exact"])
+
+    def test_ingest_connection_refused_returns_json_failure(self):
+        result = subprocess.run([sys.executable, "-m", "modelctl.cli", "ingest", "--endpoint", "http://127.0.0.1:9/v1"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        body = json.loads(result.stdout)
+        self.assertFalse(body["ok"], body)
+        self.assertEqual(body["models_url"], "http://127.0.0.1:9/v1/models")
+        self.assertIn("URLError", body["error"])
+
+        malformed = subprocess.run([sys.executable, "-m", "modelctl.cli", "ingest", "--endpoint", "not-a-url"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(malformed.returncode, 2, malformed.stderr + malformed.stdout)
+        malformed_body = json.loads(malformed.stdout)
+        self.assertFalse(malformed_body["ok"], malformed_body)
+        self.assertIn("ValueError", malformed_body["error"])
+
+    def test_runner_start_closes_parent_log_file_handle(self):
+        from modelctl import runner
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_path = self.write_manifest(root, f'''
+                [model]
+                id = "fd-test"
+                model_id = "fd-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [start]
+                command = ["noop"]
+                log_path = "{root / 'fd.log'}"
+                pid_path = "{root / 'fd.pid.json'}"
+            ''')
+            manifest = load_manifest(manifest_path)
+            captured = {}
+
+            class FakeProc:
+                pid = 123456
+
+            original_popen = runner.subprocess.Popen
+            try:
+                def fake_popen(*_args, **kwargs):
+                    captured["stdout"] = kwargs["stdout"]
+                    return FakeProc()
+                runner.subprocess.Popen = fake_popen
+                result = runner.start(manifest)
+            finally:
+                runner.subprocess.Popen = original_popen
+
+            self.assertTrue(result["started"], result)
+            self.assertTrue(captured["stdout"].closed, "parent must close log fd after Popen duplicates it into the child")
+
     def test_cleanup_dry_run_and_safe_execute(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -909,6 +1104,19 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn(str(overlay.resolve()), loaded.start.command)
             self.assertIn("mlx_lm", loaded.start.command)
             self.assertIn('{"enable_thinking":false}', loaded.start.command)
+            tuned_manifest_path = root / "mlx-tuned.toml"
+            tuned_manifest = subprocess.run(cmd + ["manifest", str(overlay), "--output", str(tuned_manifest_path), "--id", "qwen-test-tuned", "--port", "8124", "--prompt-cache-size", "7", "--prompt-cache-gib", "2"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(tuned_manifest.returncode, 0, tuned_manifest.stderr + tuned_manifest.stdout)
+            tuned_loaded = load_manifest(tuned_manifest_path)
+            self.assertIsNotNone(tuned_loaded.start)
+            assert tuned_loaded.start is not None
+            cache_size_idx = tuned_loaded.start.command.index("--prompt-cache-size")
+            cache_bytes_idx = tuned_loaded.start.command.index("--prompt-cache-bytes")
+            self.assertEqual(tuned_loaded.start.command[cache_size_idx + 1], "7")
+            self.assertEqual(tuned_loaded.start.command[cache_bytes_idx + 1], str(2 * 1024 * 1024 * 1024))
+            bad_cache_size = subprocess.run(cmd + ["manifest", str(overlay), "--output", str(root / "bad-cache.toml"), "--prompt-cache-size", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_cache_size.returncode, 2, bad_cache_size.stderr + bad_cache_size.stdout)
+            self.assertIn("expected a positive integer", bad_cache_size.stderr)
             bad_alias = subprocess.run(cmd + ["manifest", str(overlay), "--output", str(root / "bad.toml"), "--model-id", "qwen-test-served", "--port", "8123"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(bad_alias.returncode, 2, bad_alias.stderr + bad_alias.stdout)
 

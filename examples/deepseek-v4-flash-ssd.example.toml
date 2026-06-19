@@ -34,9 +34,15 @@ required_paths = [
   "$HOME/LLM/ssd-secondary-sidecars/deepseek-v4-flash-fp4-fp8-sidecar",
 ]
 exclusive_ports = [8127]
-# Emergency absolute ceiling only. For always-on supervision, prefer:
-# modelctl -m this-file.toml service install --restart --health-mode --max-swap-gib 48 --max-swap-delta-gib 1 --sample-sec 5 --interval 120
-max_swap_gib = 48
+# Emergency absolute ceiling only; `[health]` is what service/daemon/fleet use by default.
+max_swap_gib = 128
+
+[health]
+max_swap_gib = 128
+max_swap_delta_gib = 1
+sample_sec = 5
+smoke = true
+max_latency_sec = 180
 
 [[preflight.disk]]
 path = "$HOME"

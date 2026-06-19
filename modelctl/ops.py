@@ -12,7 +12,7 @@ from .system import disk_free_gib, human_bytes, path_size_bytes, port_is_free, s
 
 
 def validate(manifest: ModelManifest) -> dict[str, Any]:
-    return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "manifest": str(manifest.path), "has_start": manifest.start is not None, "required_paths": manifest.preflight.required_paths, "exclusive_ports": manifest.preflight.exclusive_ports, "cleanup_candidates": len(manifest.cleanup)}
+    return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "manifest": str(manifest.path), "has_start": manifest.start is not None, "required_paths": manifest.preflight.required_paths, "exclusive_ports": manifest.preflight.exclusive_ports, "cleanup_candidates": len(manifest.cleanup), "health": {"max_swap_gib": manifest.health.max_swap_gib, "max_swap_delta_gib": manifest.health.max_swap_delta_gib, "sample_sec": manifest.health.sample_sec, "smoke": manifest.health.smoke, "max_latency_sec": manifest.health.max_latency_sec, "max_io_latency_sec": manifest.health.max_io_latency_sec}}
 
 
 def preflight(manifest: ModelManifest) -> dict[str, Any]:
@@ -59,18 +59,66 @@ def _rounded(value: float | None, digits: int = 3) -> float | None:
     return None if value is None else round(value, digits)
 
 
+def _effective_health_options(
+    manifest: ModelManifest,
+    *,
+    max_swap_gib: float | None = None,
+    max_swap_delta_gib: float | None = None,
+    sample_sec: float | None = None,
+    include_smoke: bool = False,
+    max_latency_sec: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "max_swap_gib": max_swap_gib if max_swap_gib is not None else (manifest.health.max_swap_gib if manifest.health.max_swap_gib is not None else manifest.preflight.max_swap_gib),
+        "max_swap_delta_gib": max_swap_delta_gib if max_swap_delta_gib is not None else manifest.health.max_swap_delta_gib,
+        "sample_sec": sample_sec if sample_sec is not None else manifest.health.sample_sec,
+        "include_smoke": bool(include_smoke or manifest.health.smoke),
+        "max_latency_sec": max_latency_sec if max_latency_sec is not None else manifest.health.max_latency_sec,
+        "max_io_latency_sec": manifest.health.max_io_latency_sec,
+    }
+
+
+def _io_probe(manifest: ModelManifest, *, max_bytes: int = 4 * 1024 * 1024) -> dict[str, Any]:
+    for raw_path in manifest.preflight.required_paths:
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        started = time.perf_counter()
+        bytes_read = 0
+        with path.open("rb") as fh:
+            data = fh.read(max_bytes)
+            bytes_read = len(data)
+        elapsed = time.perf_counter() - started
+        return {"ok": True, "path": str(path), "bytes_read": bytes_read, "elapsed_s": round(elapsed, 6)}
+    return {"ok": False, "error": "no file in preflight.required_paths to probe"}
+
+
 def health(
     manifest: ModelManifest,
     *,
     max_swap_gib: float | None = None,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
 ) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     issues: list[str] = []
     warnings: list[str] = []
+    options = _effective_health_options(
+        manifest,
+        max_swap_gib=max_swap_gib,
+        max_swap_delta_gib=max_swap_delta_gib,
+        sample_sec=sample_sec,
+        include_smoke=include_smoke,
+        max_latency_sec=max_latency_sec,
+    )
+    effective_max_swap_gib = options["max_swap_gib"]
+    effective_max_swap_delta_gib = options["max_swap_delta_gib"]
+    effective_sample_sec = float(options["sample_sec"] or 0.0)
+    effective_include_smoke = bool(options["include_smoke"])
+    effective_max_latency_sec = options["max_latency_sec"]
+    effective_max_io_latency_sec = options["max_io_latency_sec"]
 
     def record(name: str, ok: bool, *, severity: str = "critical", **detail: Any) -> None:
         nonlocal checks, issues, warnings
@@ -93,34 +141,43 @@ def health(
     except Exception as exc:
         record("readiness", False, error=f"{type(exc).__name__}: {exc}")
 
-    ceiling = max_swap_gib if max_swap_gib is not None else manifest.preflight.max_swap_gib
+    ceiling = effective_max_swap_gib
     swap_before = swap_used_gib()
     swap_after = swap_before
-    if sample_sec > 0:
-        time.sleep(sample_sec)
+    if effective_sample_sec > 0:
+        time.sleep(effective_sample_sec)
         swap_after = swap_used_gib()
-    elif max_swap_delta_gib is not None:
+    elif effective_max_swap_delta_gib is not None:
         swap_after = swap_used_gib()
     swap_delta = None if swap_before is None or swap_after is None else swap_after - swap_before
-    swap_detail = {
+    swap_detail: dict[str, Any] = {
         "used_gib": _rounded(swap_after),
         "before_gib": _rounded(swap_before),
         "after_gib": _rounded(swap_after),
         "delta_gib": _rounded(swap_delta),
         "max_swap_gib": ceiling,
-        "max_swap_delta_gib": max_swap_delta_gib,
-        "sample_sec": sample_sec,
+        "max_swap_delta_gib": effective_max_swap_delta_gib,
+        "sample_sec": effective_sample_sec,
     }
     swap_ok = True
     if ceiling is not None and swap_after is not None and swap_after > ceiling:
         swap_ok = False
         swap_detail["breach"] = "absolute"
-    if max_swap_delta_gib is not None and swap_delta is not None and swap_delta > max_swap_delta_gib:
+    if effective_max_swap_delta_gib is not None and swap_delta is not None and swap_delta > effective_max_swap_delta_gib:
         swap_ok = False
         swap_detail["breach"] = "delta" if swap_detail.get("breach") is None else "absolute_and_delta"
     record("swap", swap_ok, **swap_detail)
 
-    if include_smoke:
+    if effective_max_io_latency_sec is not None:
+        try:
+            io_result = _io_probe(manifest)
+            io_ok = bool(io_result.get("ok")) and float(io_result.get("elapsed_s", 0.0)) <= float(effective_max_io_latency_sec)
+            io_detail = {k: v for k, v in io_result.items() if k != "ok"}
+            record("io", io_ok, severity="warn", max_io_latency_sec=effective_max_io_latency_sec, **io_detail)
+        except Exception as exc:
+            record("io", False, severity="warn", max_io_latency_sec=effective_max_io_latency_sec, error=f"{type(exc).__name__}: {exc}")
+
+    if effective_include_smoke:
         t0 = time.time()
         try:
             result = smoke(manifest)
@@ -128,8 +185,8 @@ def health(
             smoke_ok = bool(result.get("ok"))
             detail = {"elapsed_s": round(elapsed, 3), "result": {k: v for k, v in result.items() if k != "raw"}}
             record("smoke", smoke_ok, **detail)
-            if max_latency_sec is not None and elapsed > max_latency_sec:
-                checks["smoke_latency"] = {"status": "warn", "ok": False, "elapsed_s": round(elapsed, 3), "max_latency_sec": max_latency_sec}
+            if effective_max_latency_sec is not None and elapsed > effective_max_latency_sec:
+                checks["smoke_latency"] = {"status": "warn", "ok": False, "elapsed_s": round(elapsed, 3), "max_latency_sec": effective_max_latency_sec}
                 warnings.append("smoke_latency")
         except Exception as exc:
             elapsed = time.time() - t0
@@ -146,13 +203,22 @@ def health(
         "endpoint": manifest.endpoint,
         "issues": issues,
         "warnings": warnings,
+        "thresholds": {
+            "max_swap_gib": effective_max_swap_gib,
+            "max_swap_delta_gib": effective_max_swap_delta_gib,
+            "sample_sec": effective_sample_sec,
+            "smoke": effective_include_smoke,
+            "max_latency_sec": effective_max_latency_sec,
+            "max_io_latency_sec": effective_max_io_latency_sec,
+        },
         "checks": checks,
     }
 
 
 def smoke(manifest: ModelManifest, prompt: str | None = None, expect: str | None = None, max_tokens: int | None = None, temperature: float | None = None) -> dict[str, Any]:
+    prompt_overridden = prompt is not None
     prompt = prompt if prompt is not None else manifest.smoke.prompt
-    expect = expect if expect is not None else manifest.smoke.expect
+    expect = expect if expect is not None else (None if prompt_overridden else manifest.smoke.expect)
     payload = {"model": manifest.model_id, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens if max_tokens is not None else manifest.smoke.max_tokens, "temperature": temperature if temperature is not None else manifest.smoke.temperature}
     status_code, body, _text = http_json("POST", manifest.chat_url, payload=payload, timeout=manifest.smoke.timeout_sec)
     content = ""
@@ -365,6 +431,7 @@ def bench(manifest: ModelManifest, prompt_chars: list[int], repeats: int = 1, ma
 
 
 def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duration_sec: float = 0.0, interval_sec: float = 10.0, stop_on_breach: bool = False) -> dict[str, Any]:
+    ceiling = max_swap_gib if max_swap_gib is not None else (manifest.health.max_swap_gib if manifest.health.max_swap_gib is not None else manifest.preflight.max_swap_gib)
     samples: list[dict[str, Any]] = []
     deadline = time.time() + max(0.0, duration_sec)
     breached = False
@@ -384,7 +451,7 @@ def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duratio
             "swap_used_gib": None if used is None else round(used, 3),
             "readiness_error": readiness_error,
         }
-        if max_swap_gib is not None and used is not None and used > max_swap_gib:
+        if ceiling is not None and used is not None and used > ceiling:
             sample["breach"] = "swap"
             breached = True
         if readiness_error is not None or not ready:
@@ -398,7 +465,7 @@ def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duratio
         if duration_sec <= 0 or time.time() >= deadline:
             break
         time.sleep(max(0.1, interval_sec))
-    return {"ok": not breached, "breached": breached, "max_swap_gib": max_swap_gib, "duration_sec": duration_sec, "interval_sec": interval_sec, "stop_on_breach": stop_on_breach, "stop_result": stop_result, "samples": samples}
+    return {"ok": not breached, "breached": breached, "max_swap_gib": ceiling, "duration_sec": duration_sec, "interval_sec": interval_sec, "stop_on_breach": stop_on_breach, "stop_result": stop_result, "samples": samples}
 
 
 def daemon(
@@ -410,30 +477,51 @@ def daemon(
     wait: bool = True,
     *,
     max_swap_delta_gib: float | None = None,
-    sample_sec: float = 0.0,
+    sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
     health_mode: bool = False,
 ) -> dict[str, Any]:
+    options = _effective_health_options(
+        manifest,
+        max_swap_gib=max_swap_gib,
+        max_swap_delta_gib=max_swap_delta_gib,
+        sample_sec=sample_sec,
+        include_smoke=include_smoke,
+        max_latency_sec=max_latency_sec,
+    )
+    effective_max_swap_gib = options["max_swap_gib"]
+    effective_max_swap_delta_gib = options["max_swap_delta_gib"]
+    effective_sample_sec = float(options["sample_sec"] or 0.0)
+    effective_include_smoke = bool(options["include_smoke"])
+    effective_max_latency_sec = options["max_latency_sec"]
+    effective_health_mode = bool(
+        health_mode
+        or effective_max_swap_delta_gib is not None
+        or effective_sample_sec > 0
+        or effective_include_smoke
+        or effective_max_latency_sec is not None
+        or options["max_io_latency_sec"] is not None
+    )
     rows: list[dict[str, Any]] = []
     index = 0
     ok = True
     while True:
         index += 1
-        if health_mode:
+        if effective_health_mode:
             sample = health(
                 manifest,
-                max_swap_gib=max_swap_gib,
-                max_swap_delta_gib=max_swap_delta_gib,
-                sample_sec=sample_sec,
-                include_smoke=include_smoke,
-                max_latency_sec=max_latency_sec,
+                max_swap_gib=effective_max_swap_gib,
+                max_swap_delta_gib=effective_max_swap_delta_gib,
+                sample_sec=effective_sample_sec,
+                include_smoke=effective_include_smoke,
+                max_latency_sec=effective_max_latency_sec,
             )
             first = sample
             breached = not bool(sample.get("ok"))
             row_time = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         else:
-            sample = watchdog(manifest, max_swap_gib=max_swap_gib, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
+            sample = watchdog(manifest, max_swap_gib=effective_max_swap_gib, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
             first = sample["samples"][0] if sample.get("samples") else {}
             breached = bool(sample.get("breached"))
             row_time = first.get("time")
@@ -455,4 +543,4 @@ def daemon(
         if iterations is not None and index >= iterations:
             break
         time.sleep(max(0.1, interval_sec))
-    return {"ok": ok, "iterations_requested": iterations, "iterations_completed": len(rows), "restart": restart, "health_mode": health_mode, "max_swap_gib": max_swap_gib, "max_swap_delta_gib": max_swap_delta_gib, "sample_sec": sample_sec, "include_smoke": include_smoke, "max_latency_sec": max_latency_sec, "interval_sec": interval_sec, "iterations": rows}
+    return {"ok": ok, "iterations_requested": iterations, "iterations_completed": len(rows), "restart": restart, "health_mode": effective_health_mode, "max_swap_gib": effective_max_swap_gib, "max_swap_delta_gib": effective_max_swap_delta_gib, "sample_sec": effective_sample_sec, "include_smoke": effective_include_smoke, "max_latency_sec": effective_max_latency_sec, "interval_sec": interval_sec, "iterations": rows}
