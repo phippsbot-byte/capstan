@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-modelctl"
-version = "0.17.0"
+version = "0.18.0"
 description = "Manifest-driven lifecycle control for local LLM servers."
 readme = "README.md"
 requires-python = ">=3.11"

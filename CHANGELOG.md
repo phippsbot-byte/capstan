@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.18.0
+
+- Add manifest-owned `[health]` defaults for `health`, `daemon --health-mode`, and `service install` so launchd supervisors can carry the same safety gates as one-shot checks.
+- Add `modelctl rotate --to TARGET.toml` for same-endpoint/same-model process rotation with readiness gating, rollback on failed target startup, atomic PID handoff, and PID ownership guards.
+- Harden MLX manifest generation, ingest failure JSON, runner log descriptor cleanup, smoke expectation overrides, and IO latency health checks.
+
 ## v0.17.0
 
 - Add `--jobs` to `modelctl fleet status`, `fleet health`, and dry-run `fleet recover` for bounded concurrent fleet operations.
