@@ -225,6 +225,7 @@ def fleet_health(
             "ok": False,
             "status": "empty",
             "issues": ["no_models"],
+            "warnings": [],
             "count": 0,
             "jobs": workers,
             "elapsed_sec": _elapsed_sec(started),
@@ -232,11 +233,14 @@ def fleet_health(
             "statuses": {},
             "models": [],
         }
-    unhealthy = [row for row in rows if not row.get("ok")]
+    warning_rows = [row for row in rows if not row.get("ok") and row.get("status") == "warn"]
+    critical_rows = [row for row in rows if not row.get("ok") and row.get("status") != "warn"]
+    status_name = "critical" if critical_rows else "warn" if warning_rows else "ok"
     return {
-        "ok": not unhealthy,
-        "status": "ok" if not unhealthy else "critical",
-        "issues": [str(row.get("id") or row.get("name") or row.get("path")) for row in unhealthy],
+        "ok": status_name == "ok",
+        "status": status_name,
+        "issues": [str(row.get("id") or row.get("name") or row.get("path")) for row in critical_rows],
+        "warnings": [str(row.get("id") or row.get("name") or row.get("path")) for row in warning_rows],
         "count": len(rows),
         "jobs": workers,
         "elapsed_sec": _elapsed_sec(started),

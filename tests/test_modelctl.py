@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.21.0")
+        self.assertEqual(pyproject["project"]["version"], "0.21.1")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -200,6 +200,50 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(max_active, 2)
             self.assertEqual(sorted(calls), ["h0", "h1", "h2", "h3"])
             self.assertTrue(all(row["elapsed_sec"] >= 0 for row in result["models"]))
+
+    def test_fleet_health_warn_only_rows_do_not_escalate_to_critical(self):
+        from modelctl import fleet as fleet_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            write_registry_manifest(registry, "ok-model", "http://127.0.0.1:9200/v1")
+            write_registry_manifest(registry, "slow-model", "http://127.0.0.1:9201/v1")
+
+            original_health = fleet_mod.health
+            original_xdg = os.environ.get("XDG_CONFIG_HOME")
+            original_registry_env = os.environ.get("MODELCTL_REGISTRY")
+
+            def fake_health(manifest, **_kwargs):
+                if manifest.id == "slow-model":
+                    return {"ok": False, "status": "warn", "issues": [], "warnings": ["smoke_prompt_latency"]}
+                return {"ok": True, "status": "ok", "issues": [], "warnings": []}
+
+            try:
+                fleet_mod.health = fake_health
+                os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                os.environ.pop("MODELCTL_REGISTRY", None)
+                result = fleet_mod.fleet_health(registries=[str(registry)], jobs=1)
+            finally:
+                fleet_mod.health = original_health
+                if original_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = original_xdg
+                if original_registry_env is None:
+                    os.environ.pop("MODELCTL_REGISTRY", None)
+                else:
+                    os.environ["MODELCTL_REGISTRY"] = original_registry_env
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "warn")
+            self.assertEqual(result["issues"], [])
+            self.assertEqual(result["warnings"], ["slow-model"])
+            self.assertEqual(result["statuses"], {"ok": 1, "warn": 1})
+            rows = {row["id"]: row for row in result["models"]}
+            self.assertEqual(rows["slow-model"]["status"], "warn")
+            self.assertEqual(rows["slow-model"]["warnings"], ["smoke_prompt_latency"])
 
     def write_manifest(self, root: Path, content: str) -> Path:
         path = root / "modelctl.toml"

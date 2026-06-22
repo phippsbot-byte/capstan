@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.21.1
+
+- Fix `fleet health` aggregate status so warning-only latency rows remain top-level `warn` with `warnings`, not `critical` with `issues`.
+
 ## v0.21.0
 
 - Add smoke latency telemetry with client wall time plus server prompt/prefill and completion/decode timings when an OpenAI-compatible backend exposes timing fields.
