@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.23.0")
+        self.assertEqual(pyproject["project"]["version"], "0.23.1")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -405,6 +405,66 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("stale_pid_state", warning_codes)
             self.assertEqual(result["summary"]["issues"], len(result["issues"]))
             self.assertEqual(result["summary"]["warnings"], len(result["warnings"]))
+
+    def test_fleet_doctor_detects_duplicate_exclusive_ports_with_distinct_endpoints(self):
+        from modelctl import fleet as fleet_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            (registry / "port-a.toml").write_text(textwrap.dedent('''
+                [model]
+                id = "port-a"
+                model_id = "port-a-model"
+                endpoint = "http://127.0.0.1:9101/v1"
+
+                [preflight]
+                exclusive_ports = [9900]
+            '''), encoding="utf-8")
+            (registry / "port-b.toml").write_text(textwrap.dedent('''
+                [model]
+                id = "port-b"
+                model_id = "port-b-model"
+                endpoint = "http://127.0.0.1:9102/v1"
+
+                [preflight]
+                exclusive_ports = [9900]
+            '''), encoding="utf-8")
+
+            original_xdg = os.environ.get("XDG_CONFIG_HOME")
+            original_state = os.environ.get("XDG_STATE_HOME")
+            original_launchd = os.environ.get("MODELCTL_LAUNCHD_DIR")
+            original_registry_env = os.environ.get("MODELCTL_REGISTRY")
+            try:
+                os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                os.environ["XDG_STATE_HOME"] = str(root / "state")
+                os.environ["MODELCTL_LAUNCHD_DIR"] = str(root / "launchd")
+                os.environ.pop("MODELCTL_REGISTRY", None)
+                result = fleet_mod.fleet_doctor(registries=[str(registry)])
+            finally:
+                if original_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = original_xdg
+                if original_state is None:
+                    os.environ.pop("XDG_STATE_HOME", None)
+                else:
+                    os.environ["XDG_STATE_HOME"] = original_state
+                if original_launchd is None:
+                    os.environ.pop("MODELCTL_LAUNCHD_DIR", None)
+                else:
+                    os.environ["MODELCTL_LAUNCHD_DIR"] = original_launchd
+                if original_registry_env is None:
+                    os.environ.pop("MODELCTL_REGISTRY", None)
+                else:
+                    os.environ["MODELCTL_REGISTRY"] = original_registry_env
+
+            self.assertFalse(result["ok"], result)
+            self.assertIn("duplicate_port", {issue["code"] for issue in result["issues"]})
+            duplicate = [issue for issue in result["issues"] if issue["code"] == "duplicate_port"][0]
+            self.assertEqual(duplicate["port"], 9900)
+            self.assertEqual(set(duplicate["ids"]), {"port-a", "port-b"})
 
     def test_fleet_doctor_cli_returns_nonzero_for_inventory_issues(self):
         with tempfile.TemporaryDirectory() as td:

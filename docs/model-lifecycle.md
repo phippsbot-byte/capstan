@@ -130,7 +130,7 @@ Use `fleet doctor` when you want inventory truth without hitting model endpoints
 capstan fleet doctor
 ```
 
-It catches duplicate endpoints/ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents. It is intentionally not a liveness probe; use `fleet status` / `fleet health` for runtime state.
+It catches duplicate endpoints, duplicate endpoint/reserved ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents. It is intentionally not a liveness probe; use `fleet status` / `fleet health` for runtime state.
 
 When the fleet is down and you want a controlled recovery path, dry-run first:
 
