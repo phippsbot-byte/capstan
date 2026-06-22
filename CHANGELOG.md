@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.22.0
+
+- Add optional manifest `[fleet] enabled = false` dormant-lane metadata so registered manual/offline lanes stay visible in fleet snapshots while `fleet status`, `fleet health`, and `fleet recover` skip readiness, health, and start side effects.
+
 ## v0.21.1
 
 - Fix `fleet health` aggregate status so warning-only latency rows remain top-level `warn` with `warnings`, not `critical` with `issues`.

@@ -46,6 +46,11 @@ max_latency_sec = 180
 max_prompt_latency_sec = 60
 max_completion_latency_sec = 10
 
+[fleet]
+enabled = true
+# Set enabled=false for parked/manual lanes that should stay registered but not probed or recovered.
+reason = ""
+
 [[preflight.disk]]
 path = "$HOME"
 min_free_gib = 50

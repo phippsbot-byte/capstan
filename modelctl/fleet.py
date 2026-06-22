@@ -21,7 +21,16 @@ def _base_row(entry: dict[str, Any]) -> dict[str, Any]:
         "id": entry.get("id"),
         "model_id": entry.get("model_id"),
         "endpoint": entry.get("endpoint"),
+        "fleet": entry.get("fleet"),
     }
+
+
+def _fleet_info(manifest) -> dict[str, Any]:
+    return {"enabled": manifest.fleet.enabled, "reason": manifest.fleet.reason}
+
+
+def _disabled_reason(manifest) -> str:
+    return manifest.fleet.reason or "fleet_disabled"
 
 
 def _service_snapshot(manifest) -> dict[str, Any]:
@@ -69,6 +78,27 @@ def _fleet_status_row(entry: dict[str, Any], *, swap: float | None, readiness_ti
         }
     try:
         manifest = load_manifest(Path(str(entry["path"])))
+        if not manifest.fleet.enabled:
+            return {
+                **row,
+                "ok": True,
+                "valid": True,
+                "state": "dormant",
+                "ready": None,
+                "pid": active_pid(manifest),
+                "pid_path": str(default_pid_path(manifest)),
+                "pid_state": read_pid_state(manifest),
+                "log_path": str(default_log_path(manifest)),
+                "has_start": manifest.start is not None,
+                "readiness": None,
+                "readiness_error": None,
+                "swap_used_gib": None if swap is None else round(swap, 3),
+                "service": _service_snapshot(manifest),
+                "fleet": _fleet_info(manifest),
+                "reason": "fleet_disabled",
+                "disabled_reason": _disabled_reason(manifest),
+                "elapsed_sec": _elapsed_sec(started),
+            }
         pid = active_pid(manifest)
         try:
             readiness = readiness_check(manifest, timeout=_readiness_timeout(readiness_timeout))
@@ -159,6 +189,18 @@ def _fleet_health_row(
         }
     try:
         manifest = load_manifest(Path(str(entry["path"])))
+        if not manifest.fleet.enabled:
+            return {
+                **row,
+                "ok": True,
+                "status": "skipped",
+                "issues": [],
+                "warnings": [],
+                "fleet": _fleet_info(manifest),
+                "reason": "fleet_disabled",
+                "disabled_reason": _disabled_reason(manifest),
+                "elapsed_sec": _elapsed_sec(started),
+            }
         verdict = health(
             manifest,
             max_swap_gib=max_swap_gib,
@@ -325,6 +367,21 @@ def fleet_recover(
             }, None)
         try:
             manifest = load_manifest(Path(str(entry["path"])))
+            if not manifest.fleet.enabled:
+                return ({
+                    **row,
+                    "ok": True,
+                    "valid": True,
+                    "state": "dormant",
+                    "planned_action": "skip",
+                    "reason": "fleet_disabled",
+                    "disabled_reason": _disabled_reason(manifest),
+                    "fleet": _fleet_info(manifest),
+                    "pid": active_pid(manifest),
+                    "has_start": manifest.start is not None,
+                    "action": {"type": "skip", "reason": "fleet_disabled"},
+                    "elapsed_sec": _elapsed_sec(row_started),
+                }, None)
             before_ready, before_readiness = _readiness_or_error(manifest, readiness_timeout)
             base = {
                 **row,

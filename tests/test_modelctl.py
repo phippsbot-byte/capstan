@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.21.1")
+        self.assertEqual(pyproject["project"]["version"], "0.22.0")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -245,6 +245,83 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(rows["slow-model"]["status"], "warn")
             self.assertEqual(rows["slow-model"]["warnings"], ["smoke_prompt_latency"])
 
+    def test_fleet_disabled_manifest_is_skipped_by_status_health_and_recover(self):
+        from modelctl import fleet as fleet_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            manifest_path = registry / "dormant.toml"
+            manifest_path.write_text(textwrap.dedent('''
+                [model]
+                id = "dormant"
+                model_id = "dormant-model"
+                endpoint = "http://127.0.0.1:9999/v1"
+
+                [fleet]
+                enabled = false
+                reason = "kept registered for manual bring-up only"
+
+                [start]
+                command = "sleep 60"
+            '''), encoding="utf-8")
+
+            original_readiness = fleet_mod.readiness_check
+            original_health = fleet_mod.health
+            original_start = fleet_mod.start_model
+            original_xdg = os.environ.get("XDG_CONFIG_HOME")
+            original_registry_env = os.environ.get("MODELCTL_REGISTRY")
+
+            def forbidden(*_args, **_kwargs):
+                raise AssertionError("disabled fleet entries must not probe or start")
+
+            try:
+                fleet_mod.readiness_check = forbidden
+                fleet_mod.health = forbidden
+                fleet_mod.start_model = forbidden
+                os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                os.environ.pop("MODELCTL_REGISTRY", None)
+
+                status = fleet_mod.fleet_status(registries=[str(registry)], jobs=1)
+                health = fleet_mod.fleet_health(registries=[str(registry)], jobs=1)
+                recovery = fleet_mod.fleet_recover(registries=[str(registry)], jobs=1, execute=False)
+            finally:
+                fleet_mod.readiness_check = original_readiness
+                fleet_mod.health = original_health
+                fleet_mod.start_model = original_start
+                if original_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = original_xdg
+                if original_registry_env is None:
+                    os.environ.pop("MODELCTL_REGISTRY", None)
+                else:
+                    os.environ["MODELCTL_REGISTRY"] = original_registry_env
+
+            self.assertTrue(status["ok"], status)
+            self.assertEqual(status["states"], {"dormant": 1})
+            status_row = status["models"][0]
+            self.assertEqual(status_row["state"], "dormant")
+            self.assertFalse(status_row["fleet"]["enabled"])
+            self.assertEqual(status_row["fleet"]["reason"], "kept registered for manual bring-up only")
+            self.assertIsNone(status_row["ready"])
+
+            self.assertTrue(health["ok"], health)
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["statuses"], {"skipped": 1})
+            health_row = health["models"][0]
+            self.assertEqual(health_row["status"], "skipped")
+            self.assertFalse(health_row["fleet"]["enabled"])
+            self.assertEqual(health_row["reason"], "fleet_disabled")
+
+            self.assertTrue(recovery["ok"], recovery)
+            self.assertEqual(recovery["planned"], {"skip": 1})
+            recovery_row = recovery["models"][0]
+            self.assertEqual(recovery_row["state"], "dormant")
+            self.assertEqual(recovery_row["planned_action"], "skip")
+            self.assertEqual(recovery_row["reason"], "fleet_disabled")
+
     def write_manifest(self, root: Path, content: str) -> Path:
         path = root / "modelctl.toml"
         path.write_text(textwrap.dedent(content), encoding="utf-8")
@@ -304,8 +381,27 @@ class ModelCtlTests(unittest.TestCase):
             ''')
             manifest = load_manifest(manifest_path)
             self.assertEqual(manifest.id, "test")
+            self.assertTrue(manifest.fleet.enabled)
+            self.assertEqual(manifest.fleet.reason, "")
             result = preflight(manifest)
             self.assertTrue(result["ok"], result)
+
+    def test_manifest_fleet_table_marks_registered_lane_dormant(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_path = self.write_manifest(root, '''
+                [model]
+                id = "dormant"
+                model_id = "dormant-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [fleet]
+                enabled = false
+                reason = "manual only"
+            ''')
+            manifest = load_manifest(manifest_path)
+            self.assertFalse(manifest.fleet.enabled)
+            self.assertEqual(manifest.fleet.reason, "manual only")
 
     def test_manifest_health_table_drives_health_wait_daemon_and_service_defaults(self):
         with tempfile.TemporaryDirectory() as td:

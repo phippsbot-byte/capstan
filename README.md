@@ -10,7 +10,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.21.1/local_modelctl-0.21.1-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.22.0/local_modelctl-0.22.0-py3-none-any.whl
 ```
 
 For local development:
@@ -123,6 +123,12 @@ max_prompt_latency_sec = 60
 max_completion_latency_sec = 10
 max_io_latency_sec = 25
 
+[fleet]
+enabled = true
+# Set enabled=false for registered dormant/manual lanes. Fleet commands keep
+# the entry visible but skip readiness, health, recover, and start side effects.
+reason = ""
+
 [[preflight.disk]]
 path = "$HOME"
 min_free_gib = 50
@@ -151,9 +157,9 @@ safe = true
 - `mlx manifest PATH --id NAME --port N --output modelctl.toml` — generate an MLX-focused manifest using `python -m mlx_lm server`; stock MLX request model defaults to `default_model`.
 - `list` — convenience alias for `registry list`; scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`.
 - `registry add/list/show/remove/use` — manage durable manifest registry entries and materialize a registered manifest into a workspace.
-- `fleet status [--registry DIR] [--jobs N]` — show the operator snapshot across registered manifests: ready/down/invalid state, PID/log paths, readiness, swap, and LaunchAgent plist presence.
-- `fleet health [--registry DIR] [--jobs N] [--smoke]` — run the structured health verdict across all registered manifests and fail if any lane is critical/invalid.
-- `fleet recover [--registry DIR] [--jobs N] [--execute] [--wait]` — plan safe starts for down registered manifests with `[start]`; dry-run is parallel-capable, but real `--execute --wait` recovery stays serial.
+- `fleet status [--registry DIR] [--jobs N]` — show the operator snapshot across registered manifests: ready/down/dormant/invalid state, PID/log paths, readiness, swap, and LaunchAgent plist presence.
+- `fleet health [--registry DIR] [--jobs N] [--smoke]` — run the structured health verdict across enabled registered manifests and fail if any active lane is critical/invalid/warn; `[fleet] enabled=false` entries are reported as skipped.
+- `fleet recover [--registry DIR] [--jobs N] [--execute] [--wait]` — plan safe starts for down enabled registered manifests with `[start]`; dry-run is parallel-capable, dormant entries are skipped, and real `--execute --wait` recovery stays serial.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
 - `rotate --to TARGET.toml` — stop the current manifest process, start a same-endpoint/same-model target, verify readiness, then atomically move target PID ownership to the current manifest PID path; failed target readiness rolls back unless `--no-rollback` is set.

@@ -68,6 +68,12 @@ class HealthConfig:
 
 
 @dataclass(slots=True)
+class FleetConfig:
+    enabled: bool = True
+    reason: str = ""
+
+
+@dataclass(slots=True)
 class PreflightConfig:
     required_paths: list[str] = field(default_factory=list)
     exclusive_ports: list[int] = field(default_factory=list)
@@ -85,6 +91,7 @@ class ModelManifest:
     start: StartConfig | None = None
     preflight: PreflightConfig = field(default_factory=PreflightConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
+    fleet: FleetConfig = field(default_factory=FleetConfig)
     smoke: SmokeConfig = field(default_factory=SmokeConfig)
     cleanup: list[CleanupCandidate] = field(default_factory=list)
 
@@ -124,6 +131,12 @@ def _as_int_list(value: Any, key: str) -> list[int]:
     if not all(isinstance(x, int) for x in items):
         raise ManifestError(f"{key} must contain only integers")
     return list(items)
+
+
+def _as_bool(value: Any, key: str) -> bool:
+    if not isinstance(value, bool):
+        raise ManifestError(f"{key} must be a boolean")
+    return value
 
 
 def load_manifest(path: str | Path) -> ModelManifest:
@@ -194,6 +207,12 @@ def load_manifest(path: str | Path) -> ModelManifest:
         max_io_latency_sec=float(health_raw["max_io_latency_sec"]) if "max_io_latency_sec" in health_raw else None,
     )
 
+    fleet_raw = _as_table(data, "fleet") if "fleet" in data else {}
+    fleet = FleetConfig(
+        enabled=_as_bool(fleet_raw.get("enabled", True), "fleet.enabled"),
+        reason=str(fleet_raw.get("reason", "")),
+    )
+
     has_smoke = "smoke" in data
     smoke_raw = _as_table(data, "smoke") if has_smoke else {}
     smoke_defaults = SmokeConfig()
@@ -216,4 +235,4 @@ def load_manifest(path: str | Path) -> ModelManifest:
             raise ManifestError("[[cleanup]] requires path")
         cleanup.append(CleanupCandidate(path=expand(str(row["path"])) or "", description=str(row.get("description", "")), safe=bool(row.get("safe", False))))
 
-    return ModelManifest(path=p, id=ident, model_id=model_id, endpoint=endpoint, description=str(model.get("description", "")), start=start_cfg, preflight=preflight, health=health, smoke=smoke, cleanup=cleanup)
+    return ModelManifest(path=p, id=ident, model_id=model_id, endpoint=endpoint, description=str(model.get("description", "")), start=start_cfg, preflight=preflight, health=health, fleet=fleet, smoke=smoke, cleanup=cleanup)

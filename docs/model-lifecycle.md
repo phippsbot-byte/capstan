@@ -103,7 +103,17 @@ Use `fleet status` first when you need to know what is actually alive:
 capstan fleet status
 ```
 
-It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, returns each lane as `ready`, `down`, or `invalid`, and includes PID/log paths, readiness detail, current swap, and whether the expected LaunchAgent plist exists. It is an operator snapshot, not a gate, so down/invalid rows still return machine-readable JSON with exit code 0.
+It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, returns each lane as `ready`, `down`, `dormant`, or `invalid`, and includes PID/log paths, readiness detail, current swap, and whether the expected LaunchAgent plist exists. It is an operator snapshot, not a gate, so down/invalid/dormant rows still return machine-readable JSON with exit code 0.
+
+For registered lanes you want visible but not probed or recovered — parked sidecars, manual bring-up experiments, old candidates — mark them dormant in the manifest:
+
+```toml
+[fleet]
+enabled = false
+reason = "manual bring-up only"
+```
+
+Dormant entries appear as `state = dormant` in `fleet status`, `status = skipped` in `fleet health`, and `planned_action = skip` in `fleet recover`. Capstan does not hit readiness/health endpoints or start commands for them.
 
 Once manifests are registered, use `fleet health` as the cheap operator gate across the whole local lane set:
 
@@ -111,7 +121,7 @@ Once manifests are registered, use `fleet health` as the cheap operator gate acr
 capstan fleet health
 ```
 
-It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each manifest, and exits non-zero if any lane is critical/invalid/warn or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet; prompt/completion latency thresholds work there too.
+It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each enabled manifest, and exits non-zero if any active lane is critical/invalid/warn or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet; prompt/completion latency thresholds work there too.
 
 When the fleet is down and you want a controlled recovery path, dry-run first:
 
@@ -120,7 +130,7 @@ capstan fleet recover
 capstan fleet recover --execute --wait
 ```
 
-`fleet recover` only starts registered manifests that are down and have a `[start]` section. It skips already-ready, invalid, and inspect-only manifests. No side effects happen unless `--execute` is passed; add `--wait` when startup should verify readiness before returning green.
+`fleet recover` only starts enabled registered manifests that are down and have a `[start]` section. It skips already-ready, dormant, invalid, and inspect-only manifests. No side effects happen unless `--execute` is passed; add `--wait` when startup should verify readiness before returning green.
 
 ## macOS service wrapper
 

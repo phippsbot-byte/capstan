@@ -67,6 +67,7 @@ def _entry_for(path: Path) -> dict[str, Any]:
             "model_id": manifest.model_id,
             "endpoint": manifest.endpoint,
             "description": manifest.description,
+            "fleet": {"enabled": manifest.fleet.enabled, "reason": manifest.fleet.reason},
         }
     except ManifestError as exc:
         return {"ok": False, "path": str(path), "name": path.stem, "error": str(exc)}
@@ -108,7 +109,7 @@ def add_registry(source: str, name: str | None = None, registry_dir: str | None 
     target.write_text(Path(source).expanduser().read_text(encoding="utf-8"), encoding="utf-8")
     # Validate the copy.
     copied = load_manifest(target)
-    return {"ok": True, "path": str(target), "name": target.stem, "id": copied.id, "model_id": copied.model_id, "endpoint": copied.endpoint}
+    return {"ok": True, "path": str(target), "name": target.stem, "id": copied.id, "model_id": copied.model_id, "endpoint": copied.endpoint, "fleet": {"enabled": copied.fleet.enabled, "reason": copied.fleet.reason}}
 
 
 def remove_registry(name: str, registry_dir: str | None = None, missing_ok: bool = False) -> dict[str, Any]:
@@ -147,4 +148,4 @@ def use_registry(name: str, output: str = "modelctl.toml", registry_dir: str | N
         mode = "copy"
     # Validate the materialized manifest, not just the registry copy.
     materialized = load_manifest(target)
-    return {"ok": True, "mode": mode, "source": str(source), "output": str(target), "id": materialized.id, "model_id": materialized.model_id, "endpoint": materialized.endpoint}
+    return {"ok": True, "mode": mode, "source": str(source), "output": str(target), "id": materialized.id, "model_id": materialized.model_id, "endpoint": materialized.endpoint, "fleet": {"enabled": materialized.fleet.enabled, "reason": materialized.fleet.reason}}
