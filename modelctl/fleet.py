@@ -355,8 +355,11 @@ def fleet_doctor(*, registries: list[str] | None = None, limit: int | None = Non
         ident = manifest.id
         expected_service_labels.add(default_label(manifest))
         endpoint_rows.setdefault(manifest.endpoint, []).append(ident)
-        port = _endpoint_port(manifest.endpoint)
-        if port is not None:
+        inventory_ports = set(manifest.preflight.exclusive_ports)
+        endpoint_port = _endpoint_port(manifest.endpoint)
+        if endpoint_port is not None:
+            inventory_ports.add(endpoint_port)
+        for port in sorted(inventory_ports):
             port_rows.setdefault(port, []).append(ident)
 
         row_issues: list[str] = []
@@ -382,6 +385,7 @@ def fleet_doctor(*, registries: list[str] | None = None, limit: int | None = Non
             "warnings": row_warnings,
             "fleet": _fleet_info(manifest),
             "has_start": manifest.start is not None,
+            "inventory_ports": sorted(inventory_ports),
             "required_paths_missing": missing_paths,
             "pid_path": str(default_pid_path(manifest)),
             "pid_state": pid_state,

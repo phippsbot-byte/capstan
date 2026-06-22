@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.23.1
+
+- Fix `fleet doctor` duplicate-port detection to include manifest-owned `[preflight].exclusive_ports`, not just endpoint URL ports.
+
 ## v0.23.0
 
 - Add `fleet doctor` for non-probing fleet inventory audits: duplicate endpoints/ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents.
