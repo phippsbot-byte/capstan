@@ -662,6 +662,177 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(state["manifest"], str(current_path.resolve()))
             self.assertEqual(state["source_manifest"], str(target_path.resolve()))
 
+    def test_promote_dry_run_plans_preflight_and_rotate_without_side_effects(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            for path, ident in ((current_path, "current"), (target_path, "target")):
+                path.write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "{ident}"
+                    model_id = "stable-model"
+                    endpoint = "http://127.0.0.1:9000/v1"
+
+                    [start]
+                    command = ["noop"]
+                    pid_path = "{root / (ident + '.pid.json')}"
+                '''), encoding="utf-8")
+            cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(current_path), "promote", "--candidate", str(target_path)]
+            planned = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(planned.returncode, 0, planned.stderr + planned.stdout)
+            body = json.loads(planned.stdout)
+            self.assertTrue(body["ok"], body)
+            self.assertEqual(body["status"], "planned")
+            self.assertFalse(body["execute"])
+            self.assertEqual(body["rotate_plan"]["status"], "planned")
+            self.assertFalse((root / "current.pid.json").exists())
+            self.assertFalse((root / "target.pid.json").exists())
+            bad_nan = subprocess.run(cmd + ["--max-swap-gib", "nan"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(bad_nan.returncode, 2)
+            self.assertIn("expected a non-negative finite number", bad_nan.stderr)
+
+    def test_promote_tolerates_candidate_port_occupied_by_current_lane(self):
+        from modelctl import promote as promote_mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            for path, ident in ((current_path, "current"), (target_path, "target")):
+                path.write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "{ident}"
+                    model_id = "stable-model"
+                    endpoint = "http://127.0.0.1:9123/v1"
+
+                    [start]
+                    command = ["noop"]
+                    pid_path = "{root / (ident + '.pid.json')}"
+                '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            target = load_manifest(target_path)
+            original_preflight = promote_mod.preflight
+            original_rotate = promote_mod.rotate
+            try:
+                def fake_preflight(manifest):
+                    if manifest.id == "current":
+                        return {"ok": True, "checks": [{"type": "port", "port": 9123, "ok": True, "free": False, "active_pid": 123}]}
+                    return {"ok": False, "checks": [{"type": "port", "port": 9123, "ok": False, "free": False, "active_pid": None}]}
+                promote_mod.preflight = fake_preflight
+                promote_mod.rotate = lambda *args, **kwargs: {"ok": True, "status": "planned"}
+                result = promote_mod.promote(current, target)
+            finally:
+                promote_mod.preflight = original_preflight
+                promote_mod.rotate = original_rotate
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["status"], "planned")
+            self.assertEqual(result["tolerated_candidate_preflight"], ["shared_endpoint_port:9123"])
+
+    def test_promote_execute_uses_candidate_health_and_smoke_defaults_after_handoff(self):
+        from modelctl import promote as promote_mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            current_path.write_text(textwrap.dedent(f'''
+                [model]
+                id = "current"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:9000/v1"
+
+                [start]
+                command = ["noop"]
+                pid_path = "{root / 'current.pid.json'}"
+
+                [smoke]
+                prompt = "current"
+                expect = "current-ok"
+            '''), encoding="utf-8")
+            target_path.write_text(textwrap.dedent(f'''
+                [model]
+                id = "target"
+                model_id = "stable-model"
+                endpoint = "http://127.0.0.1:9000/v1"
+
+                [start]
+                command = ["noop"]
+                pid_path = "{root / 'target.pid.json'}"
+
+                [health]
+                smoke = true
+
+                [smoke]
+                prompt = "candidate"
+                expect = "candidate-ok"
+            '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            target = load_manifest(target_path)
+            original_preflight = promote_mod.preflight
+            original_rotate = promote_mod.rotate
+            original_health = promote_mod.health
+            try:
+                promote_mod.preflight = lambda manifest: {"ok": True, "id": manifest.id}
+                promote_mod.rotate = lambda *args, **kwargs: {"ok": True, "status": "rotated", "new_pid": 222}
+                def fake_health(manifest, **_kwargs):
+                    return {"ok": manifest.smoke.expect == "candidate-ok" and manifest.start == current.start, "status": "ok" if manifest.smoke.expect == "candidate-ok" else "critical", "expect": manifest.smoke.expect}
+                promote_mod.health = fake_health
+                result = promote_mod.promote(current, target, execute=True)
+            finally:
+                promote_mod.preflight = original_preflight
+                promote_mod.rotate = original_rotate
+                promote_mod.health = original_health
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["status"], "promoted")
+            self.assertEqual(result["post_health"]["expect"], "candidate-ok")
+
+    def test_promote_execute_rolls_back_on_post_health_failure(self):
+        from modelctl import promote as promote_mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current_path = root / "current.toml"
+            target_path = root / "target.toml"
+            for path, ident in ((current_path, "current"), (target_path, "target")):
+                path.write_text(textwrap.dedent(f'''
+                    [model]
+                    id = "{ident}"
+                    model_id = "stable-model"
+                    endpoint = "http://127.0.0.1:9000/v1"
+
+                    [start]
+                    command = ["noop"]
+                    pid_path = "{root / (ident + '.pid.json')}"
+                    startup_timeout_sec = 3
+                '''), encoding="utf-8")
+            current = load_manifest(current_path)
+            target = load_manifest(target_path)
+            original_preflight = promote_mod.preflight
+            original_rotate = promote_mod.rotate
+            original_health = promote_mod.health
+            original_stop = promote_mod.stop
+            original_start = promote_mod.start
+            original_wait_ready = promote_mod.wait_ready
+            calls: list[str] = []
+            try:
+                promote_mod.preflight = lambda manifest: {"ok": True, "id": manifest.id}
+                promote_mod.rotate = lambda *args, **kwargs: {"ok": True, "status": "rotated", "new_pid": 222}
+                promote_mod.health = lambda *args, **kwargs: {"ok": False, "status": "critical", "issues": ["smoke"], "warnings": []}
+                promote_mod.stop = lambda manifest, timeout_sec=10: calls.append(f"stop:{manifest.id}") or {"stopped": True, "pid": 222}
+                promote_mod.start = lambda manifest, wait=False: calls.append(f"start:{manifest.id}") or {"started": True, "pid": 333}
+                promote_mod.wait_ready = lambda manifest, timeout_sec=None: calls.append(f"wait:{manifest.id}") or {"ready": True}
+                result = promote_mod.promote(current, target, execute=True, include_smoke=True)
+            finally:
+                promote_mod.preflight = original_preflight
+                promote_mod.rotate = original_rotate
+                promote_mod.health = original_health
+                promote_mod.stop = original_stop
+                promote_mod.start = original_start
+                promote_mod.wait_ready = original_wait_ready
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "post_health_failed")
+            self.assertEqual(result["rotation"]["status"], "rotated")
+            self.assertTrue(result["rollback"]["attempted"], result)
+            self.assertEqual(calls, ["stop:current", "start:current", "wait:current"])
+
     def test_rotate_rejects_identity_mismatch_and_bad_timeouts(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

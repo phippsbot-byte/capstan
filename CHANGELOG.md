@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.19.0
+
+- Add `modelctl promote --candidate TARGET.toml` as a plan-first promotion workflow around preflight, readiness-gated rotate, candidate post-promotion health/smoke gates, and rollback on failed post-health gates.
+- Keep promotion side-effect safe by default; `--execute` is required to stop/start processes, and non-finite health-gate values are rejected.
+- Add promotion regression coverage for plan-only behavior, shared stable-port preflight tolerance, candidate health defaults, and post-health rollback.
+
 ## v0.18.0
 
 - Add manifest-owned `[health]` defaults for `health`, `daemon --health-mode`, and `service install` so launchd supervisors can carry the same safety gates as one-shot checks.
