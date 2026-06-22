@@ -246,7 +246,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("-m", "--manifest", default="modelctl.toml", help="Path to model manifest TOML")
     parser.add_argument("--pretty", action="store_true", help="Print human-readable output instead of JSON")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("version", help="Print modelctl version")
+    sub.add_parser("version", help="Print Capstan version")
     p_init = sub.add_parser("init", help="Write a starter modelctl.toml manifest")
     p_init.add_argument("--output", "-o", default="modelctl.toml")
     p_init.add_argument("--template", choices=["minimal", "llama-cpp"], default="minimal")

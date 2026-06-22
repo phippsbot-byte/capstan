@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.20.1
+
+- Fix remaining CLI help branding so `capstan --help` describes `version` as printing the Capstan version.
+
 ## v0.20.0
 
 - Rename the public product/CLI to Capstan while preserving `modelctl` as a compatibility console script.

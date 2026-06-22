@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.20.0")
+        self.assertEqual(pyproject["project"]["version"], "0.20.1")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -65,6 +65,8 @@ class ModelCtlTests(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0, help_result.stderr + help_result.stdout)
         self.assertIn("usage: capstan", help_result.stdout)
         self.assertIn("giant local LLM", help_result.stdout)
+        self.assertIn("Print Capstan version", help_result.stdout)
+        self.assertNotIn("Print modelctl version", help_result.stdout)
 
     def test_modelctl_module_cli_remains_compatible(self):
         help_result = subprocess.run([sys.executable, "-m", "modelctl.cli", "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
