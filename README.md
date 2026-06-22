@@ -8,7 +8,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.18.0/local_modelctl-0.18.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/modelctl/releases/download/v0.19.0/local_modelctl-0.19.0-py3-none-any.whl
 ```
 
 For local development:
@@ -71,6 +71,8 @@ modelctl service diff --restart --interval 120
 modelctl service start
 modelctl service status
 modelctl rotate --to candidate.toml --readiness-timeout 300
+modelctl promote --candidate candidate.toml          # plan only
+modelctl promote --candidate candidate.toml --execute --smoke --readiness-timeout 300
 modelctl watchdog --max-swap-gib 4 --duration 0
 modelctl status
 modelctl cleanup          # dry-run
@@ -149,6 +151,7 @@ safe = true
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
 - `rotate --to TARGET.toml` — stop the current manifest process, start a same-endpoint/same-model target, verify readiness, then atomically move target PID ownership to the current manifest PID path; failed target readiness rolls back unless `--no-rollback` is set.
+- `promote --candidate TARGET.toml [--execute]` — plan or execute a full promotion: current/candidate preflight, rotate dry-run, readiness-gated rotate, post-promotion health, and rollback if the post-health gate fails.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
 - `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults.

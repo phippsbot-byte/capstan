@@ -9,7 +9,7 @@ from . import __version__
 
 PRETTY = False
 
-MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "health", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service", "rotate"}
+MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "health", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service", "rotate", "promote"}
 BENCH_PRESETS = {
     "tiny": [128],
     "small": [128, 512, 1024],
@@ -88,6 +88,16 @@ def positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError("expected a positive number") from exc
     if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("expected a positive finite number")
+    return parsed
+
+
+def nonnegative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a non-negative finite number") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative finite number")
     return parsed
 
 
@@ -265,6 +275,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_rotate.add_argument("--stop-timeout", type=positive_int, default=10, help="Grace period before SIGKILL when stopping old/failed processes")
     p_rotate.add_argument("--no-rollback", action="store_true", help="Do not restart the current manifest if target readiness fails")
     p_rotate.add_argument("--dry-run", action="store_true", help="Print the rotation plan without side effects")
+    p_promote = sub.add_parser("promote", help="Plan or execute candidate promotion through preflight, rotate, and post-health gates")
+    p_promote.add_argument("--candidate", required=True, help="Candidate manifest to promote onto the current stable endpoint/model")
+    p_promote.add_argument("--execute", action="store_true", help="Perform the promotion; default is a no-side-effect plan")
+    p_promote.add_argument("--readiness-timeout", type=positive_float, default=None, help="Seconds to wait for candidate readiness")
+    p_promote.add_argument("--stop-timeout", type=positive_int, default=10, help="Grace period before SIGKILL when stopping old/failed processes")
+    p_promote.add_argument("--no-rollback", action="store_true", help="Do not restart the current manifest if candidate rotation or post-health fails")
+    p_promote.add_argument("--max-swap-gib", type=nonnegative_float, default=None, help="Post-promotion absolute swap ceiling")
+    p_promote.add_argument("--max-swap-delta-gib", type=nonnegative_float, default=None, help="Post-promotion maximum allowed swap growth across --sample-sec")
+    p_promote.add_argument("--sample-sec", type=nonnegative_float, default=None, help="Post-promotion swap sample seconds; 0 takes back-to-back samples")
+    p_promote.add_argument("--smoke", action="store_true", help="Run manifest smoke during post-promotion health")
+    p_promote.add_argument("--max-latency-sec", type=nonnegative_float, default=None, help="Maximum allowed post-promotion smoke latency")
     sub.add_parser("status", help="Print process/readiness status")
     p_health = sub.add_parser("health", help="Run high-signal readiness, pid, swap, and optional smoke health checks")
     p_health.add_argument("--max-swap-gib", type=float, default=None, help="Absolute swap ceiling; defaults to manifest preflight max_swap_gib")
@@ -392,6 +413,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "rotate":
             target = load_manifest(args.to)
             result = rotate(manifest, target, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
+        if args.command == "promote":
+            from .promote import promote
+            candidate = load_manifest(args.candidate)
+            result = promote(manifest, candidate, execute=args.execute, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec); emit(result); return 0 if result.get("ok") else 2
         if args.command == "status":
             emit(status(manifest)); return 0
         if args.command == "health":

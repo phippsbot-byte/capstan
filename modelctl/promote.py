@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+from urllib.parse import urlparse
+
+from .manifest import ModelManifest
+from .ops import health, preflight
+from .runner import rotate, start, stop, wait_ready
+
+
+def _manifest_ref(manifest: ModelManifest) -> dict[str, Any]:
+    return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "path": str(manifest.path)}
+
+
+def _rollback_current(current: ModelManifest, *, stop_timeout_sec: int, readiness_timeout_sec: float | None) -> dict[str, Any]:
+    try:
+        stopped = stop(current, timeout_sec=stop_timeout_sec)
+        started = start(current, wait=False)
+        timeout = readiness_timeout_sec if readiness_timeout_sec is not None else (current.start.startup_timeout_sec if current.start else None)
+        readiness = wait_ready(current, timeout_sec=timeout)
+        return {"attempted": True, "stop": stopped, "start": started, "readiness": readiness}
+    except Exception as exc:
+        return {"attempted": True, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _endpoint_port(manifest: ModelManifest) -> int | None:
+    parsed = urlparse(manifest.endpoint)
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "http":
+        return 80
+    if parsed.scheme == "https":
+        return 443
+    return None
+
+
+def _candidate_preflight_blocking_issues(current: ModelManifest, candidate: ModelManifest, candidate_preflight: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Separate real candidate preflight blockers from expected stable-port occupancy."""
+    if candidate_preflight.get("ok"):
+        return [], []
+    shared_port = _endpoint_port(current) if current.endpoint == candidate.endpoint and current.model_id == candidate.model_id else None
+    blocking: list[str] = []
+    tolerated: list[str] = []
+    for check in candidate_preflight.get("checks", []):
+        if not isinstance(check, dict) or check.get("ok", True):
+            continue
+        if check.get("type") == "port" and shared_port is not None and check.get("port") == shared_port:
+            tolerated.append(f"shared_endpoint_port:{shared_port}")
+            continue
+        blocking.append("candidate_preflight_failed")
+    if not blocking and not tolerated:
+        blocking.append("candidate_preflight_failed")
+    return sorted(set(blocking)), tolerated
+
+
+def _post_health_manifest(current: ModelManifest, candidate: ModelManifest) -> ModelManifest:
+    """Use candidate health/smoke gates while keeping current PID ownership after handoff."""
+    return replace(candidate, path=current.path, id=current.id, start=current.start)
+
+
+def promote(
+    current: ModelManifest,
+    candidate: ModelManifest,
+    *,
+    execute: bool = False,
+    readiness_timeout_sec: float | None = None,
+    stop_timeout_sec: int = 10,
+    rollback: bool = True,
+    max_swap_gib: float | None = None,
+    max_swap_delta_gib: float | None = None,
+    sample_sec: float | None = None,
+    include_smoke: bool = False,
+    max_latency_sec: float | None = None,
+) -> dict[str, Any]:
+    """Promote a candidate manifest through preflight, rotate, and post-health gating.
+
+    Plan-only by default. `execute=True` performs the stop/start rotation.
+    """
+    base: dict[str, Any] = {
+        "ok": False,
+        "action": "promote",
+        "execute": execute,
+        "current": _manifest_ref(current),
+        "candidate": _manifest_ref(candidate),
+        "readiness_timeout_sec": readiness_timeout_sec,
+        "stop_timeout_sec": stop_timeout_sec,
+        "rollback_enabled": rollback,
+        "health_options": {
+            "max_swap_gib": max_swap_gib,
+            "max_swap_delta_gib": max_swap_delta_gib,
+            "sample_sec": sample_sec,
+            "smoke": include_smoke,
+            "max_latency_sec": max_latency_sec,
+        },
+    }
+
+    current_preflight = preflight(current)
+    candidate_preflight = preflight(candidate)
+    rotate_plan = rotate(
+        current,
+        candidate,
+        readiness_timeout_sec=readiness_timeout_sec,
+        stop_timeout_sec=stop_timeout_sec,
+        rollback=rollback,
+        dry_run=True,
+    )
+    issues: list[str] = []
+    if not current_preflight.get("ok"):
+        issues.append("current_preflight_failed")
+    candidate_issues, tolerated_candidate_preflight = _candidate_preflight_blocking_issues(current, candidate, candidate_preflight)
+    issues.extend(candidate_issues)
+    if not rotate_plan.get("ok"):
+        issues.append("rotate_plan_failed")
+
+    common = {
+        **base,
+        "current_preflight": current_preflight,
+        "candidate_preflight": candidate_preflight,
+        "tolerated_candidate_preflight": tolerated_candidate_preflight,
+        "rotate_plan": rotate_plan,
+        "issues": issues,
+    }
+    if issues:
+        return {**common, "status": "blocked"}
+    if not execute:
+        return {**common, "ok": True, "status": "planned"}
+
+    rotation = rotate(
+        current,
+        candidate,
+        readiness_timeout_sec=readiness_timeout_sec,
+        stop_timeout_sec=stop_timeout_sec,
+        rollback=rollback,
+        dry_run=False,
+    )
+    if not rotation.get("ok"):
+        return {**common, "status": "rotation_failed", "rotation": rotation, "issues": ["rotation_failed"]}
+
+    post_health_manifest = _post_health_manifest(current, candidate)
+    post_health = health(
+        post_health_manifest,
+        max_swap_gib=max_swap_gib,
+        max_swap_delta_gib=max_swap_delta_gib,
+        sample_sec=sample_sec,
+        include_smoke=include_smoke,
+        max_latency_sec=max_latency_sec,
+    )
+    if post_health.get("ok"):
+        return {**common, "ok": True, "status": "promoted", "rotation": rotation, "post_health": post_health}
+
+    rollback_result = {"attempted": False}
+    if rollback:
+        rollback_result = _rollback_current(current, stop_timeout_sec=stop_timeout_sec, readiness_timeout_sec=readiness_timeout_sec)
+    return {
+        **common,
+        "status": "post_health_failed",
+        "rotation": rotation,
+        "post_health": post_health,
+        "rollback": rollback_result,
+        "issues": ["post_health_failed"],
+    }
