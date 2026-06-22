@@ -12,7 +12,7 @@ from .system import disk_free_gib, human_bytes, path_size_bytes, port_is_free, s
 
 
 def validate(manifest: ModelManifest) -> dict[str, Any]:
-    return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "manifest": str(manifest.path), "has_start": manifest.start is not None, "required_paths": manifest.preflight.required_paths, "exclusive_ports": manifest.preflight.exclusive_ports, "cleanup_candidates": len(manifest.cleanup), "health": {"max_swap_gib": manifest.health.max_swap_gib, "max_swap_delta_gib": manifest.health.max_swap_delta_gib, "sample_sec": manifest.health.sample_sec, "smoke": manifest.health.smoke, "max_latency_sec": manifest.health.max_latency_sec, "max_io_latency_sec": manifest.health.max_io_latency_sec}}
+    return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "manifest": str(manifest.path), "has_start": manifest.start is not None, "required_paths": manifest.preflight.required_paths, "exclusive_ports": manifest.preflight.exclusive_ports, "cleanup_candidates": len(manifest.cleanup), "health": {"max_swap_gib": manifest.health.max_swap_gib, "max_swap_delta_gib": manifest.health.max_swap_delta_gib, "sample_sec": manifest.health.sample_sec, "smoke": manifest.health.smoke, "max_latency_sec": manifest.health.max_latency_sec, "max_prompt_latency_sec": manifest.health.max_prompt_latency_sec, "max_completion_latency_sec": manifest.health.max_completion_latency_sec, "max_io_latency_sec": manifest.health.max_io_latency_sec}}
 
 
 def preflight(manifest: ModelManifest) -> dict[str, Any]:
@@ -67,6 +67,8 @@ def _effective_health_options(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
 ) -> dict[str, Any]:
     return {
         "max_swap_gib": max_swap_gib if max_swap_gib is not None else (manifest.health.max_swap_gib if manifest.health.max_swap_gib is not None else manifest.preflight.max_swap_gib),
@@ -74,6 +76,8 @@ def _effective_health_options(
         "sample_sec": sample_sec if sample_sec is not None else manifest.health.sample_sec,
         "include_smoke": bool(include_smoke or manifest.health.smoke),
         "max_latency_sec": max_latency_sec if max_latency_sec is not None else manifest.health.max_latency_sec,
+        "max_prompt_latency_sec": max_prompt_latency_sec if max_prompt_latency_sec is not None else manifest.health.max_prompt_latency_sec,
+        "max_completion_latency_sec": max_completion_latency_sec if max_completion_latency_sec is not None else manifest.health.max_completion_latency_sec,
         "max_io_latency_sec": manifest.health.max_io_latency_sec,
     }
 
@@ -93,6 +97,41 @@ def _io_probe(manifest: ModelManifest, *, max_bytes: int = 4 * 1024 * 1024) -> d
     return {"ok": False, "error": "no file in preflight.required_paths to probe"}
 
 
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _timing_ms(timings: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _number(timings.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _latency_summary(body: Any, *, elapsed_s: float) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_timings = body.get("timings") if isinstance(body, dict) and isinstance(body.get("timings"), dict) else None
+    timings = dict(raw_timings) if raw_timings else None
+    raw_usage = body.get("usage") if isinstance(body, dict) else None
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    prompt_ms = _timing_ms(timings or {}, "prompt_ms", "prompt_eval_ms")
+    completion_ms = _timing_ms(timings or {}, "predicted_ms", "completion_ms", "eval_ms")
+    latency: dict[str, Any] = {
+        "wall_s": round(elapsed_s, 3),
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "server_prompt_s": None if prompt_ms is None else round(prompt_ms / 1000.0, 3),
+        "server_completion_s": None if completion_ms is None else round(completion_ms / 1000.0, 3),
+    }
+    if timings:
+        if "prompt_per_second" in timings:
+            latency["prompt_tokens_per_sec"] = timings.get("prompt_per_second")
+        if "predicted_per_second" in timings:
+            latency["completion_tokens_per_sec"] = timings.get("predicted_per_second")
+    return latency, timings
+
+
 def health(
     manifest: ModelManifest,
     *,
@@ -101,6 +140,8 @@ def health(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
 ) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     issues: list[str] = []
@@ -112,12 +153,16 @@ def health(
         sample_sec=sample_sec,
         include_smoke=include_smoke,
         max_latency_sec=max_latency_sec,
+        max_prompt_latency_sec=max_prompt_latency_sec,
+        max_completion_latency_sec=max_completion_latency_sec,
     )
     effective_max_swap_gib = options["max_swap_gib"]
     effective_max_swap_delta_gib = options["max_swap_delta_gib"]
     effective_sample_sec = float(options["sample_sec"] or 0.0)
     effective_include_smoke = bool(options["include_smoke"])
     effective_max_latency_sec = options["max_latency_sec"]
+    effective_max_prompt_latency_sec = options["max_prompt_latency_sec"]
+    effective_max_completion_latency_sec = options["max_completion_latency_sec"]
     effective_max_io_latency_sec = options["max_io_latency_sec"]
 
     def record(name: str, ok: bool, *, severity: str = "critical", **detail: Any) -> None:
@@ -188,6 +233,28 @@ def health(
             if effective_max_latency_sec is not None and elapsed > effective_max_latency_sec:
                 checks["smoke_latency"] = {"status": "warn", "ok": False, "elapsed_s": round(elapsed, 3), "max_latency_sec": effective_max_latency_sec}
                 warnings.append("smoke_latency")
+            latency_candidate = result.get("latency")
+            latency: dict[str, Any] = latency_candidate if isinstance(latency_candidate, dict) else {}
+            server_prompt_s = latency.get("server_prompt_s")
+            if effective_max_prompt_latency_sec is not None and isinstance(server_prompt_s, (int, float)) and server_prompt_s > effective_max_prompt_latency_sec:
+                checks["smoke_prompt_latency"] = {
+                    "status": "warn",
+                    "ok": False,
+                    "server_prompt_s": server_prompt_s,
+                    "max_prompt_latency_sec": effective_max_prompt_latency_sec,
+                    "latency": latency,
+                }
+                warnings.append("smoke_prompt_latency")
+            server_completion_s = latency.get("server_completion_s")
+            if effective_max_completion_latency_sec is not None and isinstance(server_completion_s, (int, float)) and server_completion_s > effective_max_completion_latency_sec:
+                checks["smoke_completion_latency"] = {
+                    "status": "warn",
+                    "ok": False,
+                    "server_completion_s": server_completion_s,
+                    "max_completion_latency_sec": effective_max_completion_latency_sec,
+                    "latency": latency,
+                }
+                warnings.append("smoke_completion_latency")
         except Exception as exc:
             elapsed = time.time() - t0
             record("smoke", False, elapsed_s=round(elapsed, 3), error=f"{type(exc).__name__}: {exc}")
@@ -209,6 +276,8 @@ def health(
             "sample_sec": effective_sample_sec,
             "smoke": effective_include_smoke,
             "max_latency_sec": effective_max_latency_sec,
+            "max_prompt_latency_sec": effective_max_prompt_latency_sec,
+            "max_completion_latency_sec": effective_max_completion_latency_sec,
             "max_io_latency_sec": effective_max_io_latency_sec,
         },
         "checks": checks,
@@ -220,7 +289,9 @@ def smoke(manifest: ModelManifest, prompt: str | None = None, expect: str | None
     prompt = prompt if prompt is not None else manifest.smoke.prompt
     expect = expect if expect is not None else (None if prompt_overridden else manifest.smoke.expect)
     payload = {"model": manifest.model_id, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens if max_tokens is not None else manifest.smoke.max_tokens, "temperature": temperature if temperature is not None else manifest.smoke.temperature}
+    started = time.perf_counter()
     status_code, body, _text = http_json("POST", manifest.chat_url, payload=payload, timeout=manifest.smoke.timeout_sec)
+    elapsed_s = time.perf_counter() - started
     content = ""
     finish = None
     usage = None
@@ -232,7 +303,8 @@ def smoke(manifest: ModelManifest, prompt: str | None = None, expect: str | None
             finish = choices[0].get("finish_reason")
         usage = body.get("usage")
     exact = None if expect is None else content.strip() == expect
-    return {"ok": 200 <= status_code < 300 and (exact is not False), "status": status_code, "content": content, "expect": expect, "exact": exact, "finish_reason": finish, "usage": usage, "raw": body}
+    latency, timings = _latency_summary(body, elapsed_s=elapsed_s)
+    return {"ok": 200 <= status_code < 300 and (exact is not False), "status": status_code, "content": content, "expect": expect, "exact": exact, "finish_reason": finish, "usage": usage, "elapsed_s": round(elapsed_s, 3), "latency": latency, "timings": timings, "raw": body}
 
 
 def cleanup_plan(manifest: ModelManifest) -> dict[str, Any]:
@@ -483,6 +555,8 @@ def daemon(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
     health_mode: bool = False,
 ) -> dict[str, Any]:
     options = _effective_health_options(
@@ -492,18 +566,24 @@ def daemon(
         sample_sec=sample_sec,
         include_smoke=include_smoke,
         max_latency_sec=max_latency_sec,
+        max_prompt_latency_sec=max_prompt_latency_sec,
+        max_completion_latency_sec=max_completion_latency_sec,
     )
     effective_max_swap_gib = options["max_swap_gib"]
     effective_max_swap_delta_gib = options["max_swap_delta_gib"]
     effective_sample_sec = float(options["sample_sec"] or 0.0)
     effective_include_smoke = bool(options["include_smoke"])
     effective_max_latency_sec = options["max_latency_sec"]
+    effective_max_prompt_latency_sec = options["max_prompt_latency_sec"]
+    effective_max_completion_latency_sec = options["max_completion_latency_sec"]
     effective_health_mode = bool(
         health_mode
         or effective_max_swap_delta_gib is not None
         or effective_sample_sec > 0
         or effective_include_smoke
         or effective_max_latency_sec is not None
+        or effective_max_prompt_latency_sec is not None
+        or effective_max_completion_latency_sec is not None
         or options["max_io_latency_sec"] is not None
     )
     rows: list[dict[str, Any]] = []
@@ -519,6 +599,8 @@ def daemon(
                 sample_sec=effective_sample_sec,
                 include_smoke=effective_include_smoke,
                 max_latency_sec=effective_max_latency_sec,
+                max_prompt_latency_sec=effective_max_prompt_latency_sec,
+                max_completion_latency_sec=effective_max_completion_latency_sec,
             )
             first = sample
             breached = not bool(sample.get("ok"))
@@ -546,4 +628,4 @@ def daemon(
         if iterations is not None and index >= iterations:
             break
         time.sleep(max(0.1, interval_sec))
-    return {"ok": ok, "iterations_requested": iterations, "iterations_completed": len(rows), "restart": restart, "health_mode": effective_health_mode, "max_swap_gib": effective_max_swap_gib, "max_swap_delta_gib": effective_max_swap_delta_gib, "sample_sec": effective_sample_sec, "include_smoke": effective_include_smoke, "max_latency_sec": effective_max_latency_sec, "interval_sec": interval_sec, "iterations": rows}
+    return {"ok": ok, "iterations_requested": iterations, "iterations_completed": len(rows), "restart": restart, "health_mode": effective_health_mode, "max_swap_gib": effective_max_swap_gib, "max_swap_delta_gib": effective_max_swap_delta_gib, "sample_sec": effective_sample_sec, "include_smoke": effective_include_smoke, "max_latency_sec": effective_max_latency_sec, "max_prompt_latency_sec": effective_max_prompt_latency_sec, "max_completion_latency_sec": effective_max_completion_latency_sec, "interval_sec": interval_sec, "iterations": rows}

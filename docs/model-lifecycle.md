@@ -77,6 +77,9 @@ For huge local lanes where macOS may retain stale swap, set delta sampling in `[
 max_swap_gib = 128
 max_swap_delta_gib = 1
 sample_sec = 5
+smoke = true
+max_prompt_latency_sec = 60
+max_completion_latency_sec = 10
 ```
 
 CLI flags still override the manifest for one-off probes:
@@ -85,10 +88,11 @@ CLI flags still override the manifest for one-off probes:
 capstan -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
 ```
 
-Add `--smoke` when you want endpoint behavior included, and `--max-latency-sec` when slow exact-output responses should fail the gate:
+Add `--smoke` when you want endpoint behavior included, and `--max-latency-sec` when slow exact-output responses should fail the gate. For llama.cpp-style timing payloads, Capstan also records `latency.server_prompt_s` and `latency.server_completion_s`; use prompt/completion thresholds to catch slow prefill separately from decode:
 
 ```bash
 capstan -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-gib 1 --sample-sec 5
+capstan -m modelctl.toml health --smoke --max-prompt-latency-sec 60 --max-completion-latency-sec 10
 ```
 
 ## Fleet status and health
@@ -107,7 +111,7 @@ Once manifests are registered, use `fleet health` as the cheap operator gate acr
 capstan fleet health
 ```
 
-It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each manifest, and exits non-zero if any lane is critical/invalid or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet.
+It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each manifest, and exits non-zero if any lane is critical/invalid/warn or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet; prompt/completion latency thresholds work there too.
 
 When the fleet is down and you want a controlled recovery path, dry-run first:
 

@@ -43,6 +43,8 @@ max_swap_delta_gib = 1
 sample_sec = 5
 smoke = true
 max_latency_sec = 180
+max_prompt_latency_sec = 60
+max_completion_latency_sec = 10
 
 [[preflight.disk]]
 path = "$HOME"

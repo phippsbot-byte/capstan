@@ -10,7 +10,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.20.1/local_modelctl-0.20.1-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.21.0/local_modelctl-0.21.0-py3-none-any.whl
 ```
 
 For local development:
@@ -119,6 +119,8 @@ max_swap_delta_gib = 1
 sample_sec = 5
 smoke = true
 max_latency_sec = 180
+max_prompt_latency_sec = 60
+max_completion_latency_sec = 10
 max_io_latency_sec = 25
 
 [[preflight.disk]]
@@ -158,7 +160,7 @@ safe = true
 - `promote --candidate TARGET.toml [--execute]` — plan or execute a full promotion: current/candidate preflight, rotate dry-run, readiness-gated rotate, post-promotion health, and rollback if the post-health gate fails.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
-- `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults.
+- `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults. OpenAI-style server timings are surfaced as `latency.server_prompt_s` / `latency.server_completion_s`; use `max_prompt_latency_sec` and `max_completion_latency_sec` to warn on slow prefill/decode without failing basic liveness.
 - `doctor --fix` — run diagnostics and apply safe local repairs like stale PID-state removal and state-dir creation.
 - `report --format md --output report.md` — write JSON/Markdown model state reports.
 - `reports save/list/show` — keep/query saved report history under the compatibility `modelctl` state directory.

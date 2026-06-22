@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.20.1")
+        self.assertEqual(pyproject["project"]["version"], "0.21.0")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -313,6 +313,8 @@ class ModelCtlTests(unittest.TestCase):
                 sample_sec = 0.001
                 smoke = true
                 max_latency_sec = 10
+                max_prompt_latency_sec = 11
+                max_completion_latency_sec = 12
                 max_io_latency_sec = 25
 
                 [smoke]
@@ -322,6 +324,7 @@ class ModelCtlTests(unittest.TestCase):
             ''')
             manifest = load_manifest(manifest_path)
             self.assertEqual(manifest.health.max_swap_gib, 999999)
+            self.assertEqual(manifest.health.max_prompt_latency_sec, 11)
             self.assertEqual(manifest.health.max_io_latency_sec, 25)
 
             cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
@@ -362,6 +365,10 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("--smoke", args)
             self.assertIn("--max-latency-sec", args)
             self.assertIn("10", args)
+            self.assertIn("--max-prompt-latency-sec", args)
+            self.assertIn("11", args)
+            self.assertIn("--max-completion-latency-sec", args)
+            self.assertIn("12", args)
 
     def test_smoke_custom_prompt_without_expect_is_not_forced_to_pong(self):
         with tempfile.TemporaryDirectory() as td:
@@ -408,6 +415,87 @@ class ModelCtlTests(unittest.TestCase):
             self.assertTrue(overridden["ok"], overridden)
             self.assertIsNone(overridden["expect"])
             self.assertIsNone(overridden["exact"])
+
+    def test_smoke_exposes_client_and_server_latency_details(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_path = self.write_manifest(root, '''
+                [model]
+                id = "timed-smoke"
+                model_id = "timed-model"
+                endpoint = "http://127.0.0.1:9/v1"
+            ''')
+            manifest = load_manifest(manifest_path)
+            from modelctl import ops as ops_mod
+            original_http_json = ops_mod.http_json
+            try:
+                ops_mod.http_json = lambda *_args, **_kwargs: (200, {
+                    "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+                    "timings": {
+                        "prompt_ms": 1234.0,
+                        "prompt_per_second": 9.72,
+                        "predicted_ms": 456.0,
+                        "predicted_per_second": 6.58,
+                    },
+                }, "")
+                result = ops_mod.smoke(manifest)
+            finally:
+                ops_mod.http_json = original_http_json
+            self.assertTrue(result["ok"], result)
+            self.assertIn("elapsed_s", result)
+            self.assertEqual(result["latency"]["server_prompt_s"], 1.234)
+            self.assertEqual(result["latency"]["server_completion_s"], 0.456)
+            self.assertEqual(result["latency"]["prompt_tokens"], 12)
+            self.assertEqual(result["latency"]["completion_tokens"], 3)
+            self.assertEqual(result["latency"]["prompt_tokens_per_sec"], 9.72)
+            self.assertEqual(result["latency"]["completion_tokens_per_sec"], 6.58)
+            self.assertEqual(result["timings"]["prompt_ms"], 1234.0)
+
+    def test_health_warns_on_smoke_prompt_latency_threshold(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_path = self.write_manifest(root, '''
+                [model]
+                id = "slow-prefill"
+                model_id = "slow-model"
+                endpoint = "http://127.0.0.1:9/v1"
+
+                [health]
+                smoke = true
+                max_prompt_latency_sec = 0.5
+                max_completion_latency_sec = 10
+            ''')
+            manifest = load_manifest(manifest_path)
+            self.assertEqual(manifest.health.max_prompt_latency_sec, 0.5)
+            from modelctl import ops as ops_mod
+            original_http_json = ops_mod.http_json
+            original_readiness_check = ops_mod.readiness_check
+            original_active_pid = ops_mod.active_pid
+            original_swap_used_gib = ops_mod.swap_used_gib
+            try:
+                ops_mod.active_pid = lambda _manifest: None
+                ops_mod.readiness_check = lambda _manifest, timeout=5: {"ready": True, "status": 200}
+                ops_mod.swap_used_gib = lambda: 0.0
+                ops_mod.http_json = lambda *_args, **_kwargs: (200, {
+                    "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                    "timings": {"prompt_ms": 900.0, "predicted_ms": 100.0},
+                }, "")
+                result = ops_mod.health(manifest)
+            finally:
+                ops_mod.http_json = original_http_json
+                ops_mod.readiness_check = original_readiness_check
+                ops_mod.active_pid = original_active_pid
+                ops_mod.swap_used_gib = original_swap_used_gib
+            self.assertEqual(result["status"], "warn", result)
+            self.assertIn("smoke_prompt_latency", result["warnings"])
+            prompt_latency = result["checks"]["smoke_prompt_latency"]
+            self.assertEqual(prompt_latency["status"], "warn")
+            self.assertEqual(prompt_latency["server_prompt_s"], 0.9)
+            self.assertEqual(prompt_latency["max_prompt_latency_sec"], 0.5)
+            self.assertNotIn("smoke_completion_latency", result["warnings"])
+            self.assertEqual(result["checks"]["smoke"]["result"]["latency"]["server_prompt_s"], 0.9)
 
     def test_ingest_connection_refused_returns_json_failure(self):
         result = subprocess.run([sys.executable, "-m", "modelctl.cli", "ingest", "--endpoint", "http://127.0.0.1:9/v1"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
@@ -1564,7 +1652,7 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("--max-swap-gib", preview_body["program_arguments"])
             self.assertFalse(launchd.exists(), "dry-run must not create LaunchAgents")
 
-            health_preview = subprocess.run(cmd + ["service", "install", "--dry-run", "--restart", "--max-swap-gib", "48", "--max-swap-delta-gib", "1", "--sample-sec", "5", "--smoke", "--max-latency-sec", "30", "--interval", "120"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            health_preview = subprocess.run(cmd + ["service", "install", "--dry-run", "--restart", "--max-swap-gib", "48", "--max-swap-delta-gib", "1", "--sample-sec", "5", "--smoke", "--max-latency-sec", "30", "--max-prompt-latency-sec", "12", "--max-completion-latency-sec", "7", "--interval", "120"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(health_preview.returncode, 0, health_preview.stderr + health_preview.stdout)
             health_preview_body = json.loads(health_preview.stdout)
             health_args = health_preview_body["program_arguments"]
@@ -1576,6 +1664,10 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("--smoke", health_args)
             self.assertIn("--max-latency-sec", health_args)
             self.assertIn("30", health_args)
+            self.assertIn("--max-prompt-latency-sec", health_args)
+            self.assertIn("12", health_args)
+            self.assertIn("--max-completion-latency-sec", health_args)
+            self.assertIn("7", health_args)
             self.assertFalse(launchd.exists(), "health dry-run must not create LaunchAgents")
 
             installed = subprocess.run(cmd + ["service", "install", "--restart", "--max-swap-gib", "4", "--interval", "5"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)

@@ -72,6 +72,8 @@ def _effective_health_options(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
 ) -> dict[str, Any]:
     return {
         "max_swap_gib": max_swap_gib if max_swap_gib is not None else (manifest.health.max_swap_gib if manifest.health.max_swap_gib is not None else manifest.preflight.max_swap_gib),
@@ -79,6 +81,8 @@ def _effective_health_options(
         "sample_sec": sample_sec if sample_sec is not None else manifest.health.sample_sec,
         "include_smoke": bool(include_smoke or manifest.health.smoke),
         "max_latency_sec": max_latency_sec if max_latency_sec is not None else manifest.health.max_latency_sec,
+        "max_prompt_latency_sec": max_prompt_latency_sec if max_prompt_latency_sec is not None else manifest.health.max_prompt_latency_sec,
+        "max_completion_latency_sec": max_completion_latency_sec if max_completion_latency_sec is not None else manifest.health.max_completion_latency_sec,
         "max_io_latency_sec": manifest.health.max_io_latency_sec,
         "sample_sec_explicit": sample_sec is not None,
     }
@@ -93,6 +97,8 @@ def daemon_program_arguments(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
     health_mode: bool = False,
     interval_sec: float = 30.0,
     python: str | None = None,
@@ -117,18 +123,24 @@ def daemon_program_arguments(
         sample_sec=sample_sec,
         include_smoke=include_smoke,
         max_latency_sec=max_latency_sec,
+        max_prompt_latency_sec=max_prompt_latency_sec,
+        max_completion_latency_sec=max_completion_latency_sec,
     )
     ceiling = options["max_swap_gib"]
     effective_delta = options["max_swap_delta_gib"]
     effective_sample = float(options["sample_sec"] or 0.0)
     effective_smoke = bool(options["include_smoke"])
     effective_latency = options["max_latency_sec"]
+    effective_prompt_latency = options["max_prompt_latency_sec"]
+    effective_completion_latency = options["max_completion_latency_sec"]
     effective_health_mode = bool(
         health_mode
         or effective_delta is not None
         or effective_sample > 0
         or effective_smoke
         or effective_latency is not None
+        or effective_prompt_latency is not None
+        or effective_completion_latency is not None
         or options["max_io_latency_sec"] is not None
     )
     if effective_health_mode:
@@ -143,6 +155,10 @@ def daemon_program_arguments(
         args.append("--smoke")
     if effective_health_mode and effective_latency is not None:
         args.extend(["--max-latency-sec", _fmt_number(effective_latency)])
+    if effective_health_mode and effective_prompt_latency is not None:
+        args.extend(["--max-prompt-latency-sec", _fmt_number(effective_prompt_latency)])
+    if effective_health_mode and effective_completion_latency is not None:
+        args.extend(["--max-completion-latency-sec", _fmt_number(effective_completion_latency)])
     if restart:
         args.append("--restart")
     if not wait:
@@ -160,6 +176,8 @@ def render_launchd_plist(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
     health_mode: bool = False,
     interval_sec: float = 30.0,
     python: str | None = None,
@@ -179,6 +197,8 @@ def render_launchd_plist(
         sample_sec=sample_sec,
         include_smoke=include_smoke,
         max_latency_sec=max_latency_sec,
+        max_prompt_latency_sec=max_prompt_latency_sec,
+        max_completion_latency_sec=max_completion_latency_sec,
         health_mode=health_mode,
         interval_sec=interval_sec,
         python=python,
@@ -231,6 +251,8 @@ def diff_service(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
     health_mode: bool = False,
     interval_sec: float = 30.0,
     python: str | None = None,
@@ -264,6 +286,8 @@ def diff_service(
         sample_sec=sample_sec,
         include_smoke=include_smoke,
         max_latency_sec=max_latency_sec,
+        max_prompt_latency_sec=max_prompt_latency_sec,
+        max_completion_latency_sec=max_completion_latency_sec,
         health_mode=health_mode,
         interval_sec=interval_sec,
         python=effective_python,
@@ -311,6 +335,8 @@ def install_service(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
     health_mode: bool = False,
     interval_sec: float = 30.0,
     python: str | None = None,
@@ -330,6 +356,8 @@ def install_service(
         sample_sec=sample_sec,
         include_smoke=include_smoke,
         max_latency_sec=max_latency_sec,
+        max_prompt_latency_sec=max_prompt_latency_sec,
+        max_completion_latency_sec=max_completion_latency_sec,
         health_mode=health_mode,
         interval_sec=interval_sec,
         python=python,

@@ -62,6 +62,8 @@ class HealthConfig:
     sample_sec: float = 0.0
     smoke: bool = False
     max_latency_sec: float | None = None
+    max_prompt_latency_sec: float | None = None
+    max_completion_latency_sec: float | None = None
     max_io_latency_sec: float | None = None
 
 
@@ -187,6 +189,8 @@ def load_manifest(path: str | Path) -> ModelManifest:
         sample_sec=float(health_raw.get("sample_sec", 0.0)),
         smoke=bool(health_raw.get("smoke", False)),
         max_latency_sec=float(health_raw["max_latency_sec"]) if "max_latency_sec" in health_raw else None,
+        max_prompt_latency_sec=float(health_raw["max_prompt_latency_sec"]) if "max_prompt_latency_sec" in health_raw else None,
+        max_completion_latency_sec=float(health_raw["max_completion_latency_sec"]) if "max_completion_latency_sec" in health_raw else None,
         max_io_latency_sec=float(health_raw["max_io_latency_sec"]) if "max_io_latency_sec" in health_raw else None,
     )
 

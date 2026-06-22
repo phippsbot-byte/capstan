@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.21.0
+
+- Add smoke latency telemetry with client wall time plus server prompt/prefill and completion/decode timings when an OpenAI-compatible backend exposes timing fields.
+- Add health/fleet/daemon/service prompt and completion latency thresholds (`max_prompt_latency_sec`, `max_completion_latency_sec`) so slow prefill shows up as an operator warning instead of hiding behind a green smoke result.
+
 ## v0.20.1
 
 - Fix remaining CLI help branding so `capstan --help` describes `version` as printing the Capstan version.
