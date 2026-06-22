@@ -165,6 +165,9 @@ def add_fleet_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     p_recover.add_argument("--readiness-timeout", type=float, default=1.0, help="Per-model readiness timeout seconds")
     p_recover.add_argument("--execute", action="store_true", help="Actually start recoverable down manifests; requires --wait; dry-run by default")
     p_recover.add_argument("--wait", action="store_true", help="Wait for readiness after starting each model")
+    p_doctor = fleet.add_parser("doctor", help="Audit registry inventory and Capstan service metadata without endpoint probes", description="Audit registry inventory and Capstan service metadata without endpoint probes")
+    p_doctor.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
+    p_doctor.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
 
 
 def add_mlx_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -391,13 +394,15 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                 manifest = load_manifest(args.manifest)
                 result = save_report(manifest, fmt=args.format, include_smoke=args.include_smoke); emit(result); return 0 if result.get("ok") else 2
         if args.command == "fleet":
-            from .fleet import fleet_health, fleet_recover, fleet_status
+            from .fleet import fleet_doctor, fleet_health, fleet_recover, fleet_status
             if args.fleet_command == "status":
                 result = fleet_status(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, jobs=args.jobs); emit(result); return 0
             if args.fleet_command == "health":
                 result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, limit=args.limit, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
             if args.fleet_command == "recover":
                 result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
+            if args.fleet_command == "doctor":
+                result = fleet_doctor(registries=args.registry, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
         if args.command == "mlx":
             from .mlx import create_overlay, discover_mlx_models, inspect_mlx_model, write_mlx_manifest
             if args.mlx_command == "discover":
