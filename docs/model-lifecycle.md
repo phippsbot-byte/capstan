@@ -1,4 +1,6 @@
-# Local model lifecycle
+# Capstan local model lifecycle
+
+Capstan is still using the legacy `modelctl.toml`, `MODELCTL_*`, and `~/.config/modelctl` names in v0.20 so existing manifests and LaunchAgents stay put.
 
 A model is not "installed" until all of this is true:
 
@@ -26,47 +28,47 @@ Minimum useful gate:
 
 ```bash
 # Create modelctl.toml one of three ways:
-modelctl init --template llama-cpp --model-id local-model --output modelctl.toml --overwrite
+capstan init --template llama-cpp --model-id local-model --output modelctl.toml --overwrite
 
 # Or, for MLX artifacts, inspect and promote the served overlay:
-modelctl mlx discover --root ~/.cache/mlx-models
-modelctl mlx inspect ~/.cache/mlx-models/my-qwen-model
-modelctl mlx overlay ~/.cache/mlx-models/my-qwen-model
-modelctl mlx manifest ~/.cache/mlx-models/my-qwen-model-served --id my-qwen-model-served --port 8123 --output modelctl.toml --overwrite
+capstan mlx discover --root ~/.cache/mlx-models
+capstan mlx inspect ~/.cache/mlx-models/my-qwen-model
+capstan mlx overlay ~/.cache/mlx-models/my-qwen-model
+capstan mlx manifest ~/.cache/mlx-models/my-qwen-model-served --id my-qwen-model-served --port 8123 --output modelctl.toml --overwrite
 
 # Or, if the endpoint is already running:
-modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
+capstan ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 
-modelctl registry add --source modelctl.toml --name local-test
-modelctl registry use local-test --output modelctl.toml --overwrite
-modelctl -m modelctl.toml preflight
-modelctl -m modelctl.toml start --wait
-modelctl -m modelctl.toml smoke
-modelctl -m modelctl.toml soak --count 3
-modelctl -m modelctl.toml bench --preset tiny --output bench.md --format md
-modelctl -m modelctl.toml report --format md --output report.md
-modelctl -m modelctl.toml reports save --format json
-modelctl reports list
-modelctl fleet status
-modelctl fleet health
-modelctl fleet recover             # dry-run recovery plan
-modelctl fleet recover --execute --wait
-modelctl -m modelctl.toml doctor --fix
-modelctl -m modelctl.toml health
-modelctl -m modelctl.toml daemon --iterations 1
-modelctl -m modelctl.toml service install --restart --interval 120 --dry-run
-modelctl -m modelctl.toml service install --restart --interval 120 --overwrite
-modelctl -m modelctl.toml service diff --restart --interval 120
-modelctl -m modelctl.toml service start
-modelctl -m modelctl.toml service status
-modelctl -m modelctl.toml rotate --to candidate.toml --readiness-timeout 300
-modelctl -m modelctl.toml watchdog --max-swap-gib 4 --duration 0
-modelctl -m modelctl.toml status
+capstan registry add --source modelctl.toml --name local-test
+capstan registry use local-test --output modelctl.toml --overwrite
+capstan -m modelctl.toml preflight
+capstan -m modelctl.toml start --wait
+capstan -m modelctl.toml smoke
+capstan -m modelctl.toml soak --count 3
+capstan -m modelctl.toml bench --preset tiny --output bench.md --format md
+capstan -m modelctl.toml report --format md --output report.md
+capstan -m modelctl.toml reports save --format json
+capstan reports list
+capstan fleet status
+capstan fleet health
+capstan fleet recover             # dry-run recovery plan
+capstan fleet recover --execute --wait
+capstan -m modelctl.toml doctor --fix
+capstan -m modelctl.toml health
+capstan -m modelctl.toml daemon --iterations 1
+capstan -m modelctl.toml service install --restart --interval 120 --dry-run
+capstan -m modelctl.toml service install --restart --interval 120 --overwrite
+capstan -m modelctl.toml service diff --restart --interval 120
+capstan -m modelctl.toml service start
+capstan -m modelctl.toml service status
+capstan -m modelctl.toml rotate --to candidate.toml --readiness-timeout 300
+capstan -m modelctl.toml watchdog --max-swap-gib 4 --duration 0
+capstan -m modelctl.toml status
 ```
 
 ## Health checks
 
-`modelctl health` is the cheap green/red operator check. By default it checks PID state, readiness, and manifest-owned `[health]` defaults such as swap ceiling/delta, sample window, smoke, and latency gates.
+`capstan health` is the cheap green/red operator check. By default it checks PID state, readiness, and manifest-owned `[health]` defaults such as swap ceiling/delta, sample window, smoke, and latency gates.
 
 For huge local lanes where macOS may retain stale swap, set delta sampling in `[health]` instead of repeating flags everywhere:
 
@@ -80,13 +82,13 @@ sample_sec = 5
 CLI flags still override the manifest for one-off probes:
 
 ```bash
-modelctl -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
+capstan -m modelctl.toml health --max-swap-delta-gib 1 --sample-sec 5
 ```
 
 Add `--smoke` when you want endpoint behavior included, and `--max-latency-sec` when slow exact-output responses should fail the gate:
 
 ```bash
-modelctl -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-gib 1 --sample-sec 5
+capstan -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-gib 1 --sample-sec 5
 ```
 
 ## Fleet status and health
@@ -94,7 +96,7 @@ modelctl -m modelctl.toml health --smoke --max-latency-sec 30 --max-swap-delta-g
 Use `fleet status` first when you need to know what is actually alive:
 
 ```bash
-modelctl fleet status
+capstan fleet status
 ```
 
 It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, returns each lane as `ready`, `down`, or `invalid`, and includes PID/log paths, readiness detail, current swap, and whether the expected LaunchAgent plist exists. It is an operator snapshot, not a gate, so down/invalid rows still return machine-readable JSON with exit code 0.
@@ -102,7 +104,7 @@ It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, returns each lan
 Once manifests are registered, use `fleet health` as the cheap operator gate across the whole local lane set:
 
 ```bash
-modelctl fleet health
+capstan fleet health
 ```
 
 It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each manifest, and exits non-zero if any lane is critical/invalid or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet.
@@ -110,37 +112,37 @@ It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same st
 When the fleet is down and you want a controlled recovery path, dry-run first:
 
 ```bash
-modelctl fleet recover
-modelctl fleet recover --execute --wait
+capstan fleet recover
+capstan fleet recover --execute --wait
 ```
 
 `fleet recover` only starts registered manifests that are down and have a `[start]` section. It skips already-ready, invalid, and inspect-only manifests. No side effects happen unless `--execute` is passed; add `--wait` when startup should verify readiness before returning green.
 
 ## macOS service wrapper
 
-`modelctl service install` writes a LaunchAgent plist for the manifest. The plist runs `modelctl daemon`, not the model server directly; that keeps the control plane in one place.
+`capstan service install` writes a LaunchAgent plist for the manifest. In v0.20 the plist still invokes the compatibility `modelctl.cli daemon` module so existing service diffs stay stable; the model server itself is not launched directly.
 
 Use `--dry-run` first. It prints the plist path and daemon arguments without touching `~/Library/LaunchAgents`:
 
 ```bash
-modelctl -m modelctl.toml service install --restart --interval 120 --dry-run
+capstan -m modelctl.toml service install --restart --interval 120 --dry-run
 ```
 
 Then install and control it:
 
 ```bash
-modelctl -m modelctl.toml service install --restart --interval 120 --overwrite
-modelctl -m modelctl.toml service start
-modelctl -m modelctl.toml service status
-modelctl -m modelctl.toml service restart
-modelctl -m modelctl.toml service stop
-modelctl -m modelctl.toml service uninstall
+capstan -m modelctl.toml service install --restart --interval 120 --overwrite
+capstan -m modelctl.toml service start
+capstan -m modelctl.toml service status
+capstan -m modelctl.toml service restart
+capstan -m modelctl.toml service stop
+capstan -m modelctl.toml service uninstall
 ```
 
 Use `service diff` whenever you change a manifest or desired daemon flags. It renders the desired LaunchAgent exactly like `service install`, reads the installed plist, preserves the installed Python executable unless `--python` is supplied, and exits non-zero if ProgramArguments, logs, environment, KeepAlive, RunAtLoad, or other plist keys drifted:
 
 ```bash
-modelctl -m modelctl.toml service diff --restart --interval 120
+capstan -m modelctl.toml service diff --restart --interval 120
 ```
 
 `--restart` is explicit because it lets the daemon stop/start the model on readiness or swap breach. No sneaky self-healing time bombs.
@@ -152,7 +154,7 @@ For huge macOS model lanes, prefer manifest `[health]` delta checks so stale abs
 Use `rotate` when replacing the process behind a stable lane without manual stop/start roulette:
 
 ```bash
-modelctl -m active.toml rotate --to candidate.toml --readiness-timeout 300
+capstan -m active.toml rotate --to candidate.toml --readiness-timeout 300
 ```
 
 The target manifest must preserve the current manifest's `[model].endpoint` and `model_id`; it is for rotating the runtime behind a stable lane, not swapping client-facing identities. The sequence is deliberately boring: stop the current process, start the target, wait for the target readiness gate, then atomically move the target PID state into the current manifest's PID path. If target readiness fails, `rotate` stops the target and restarts the current manifest unless `--no-rollback` is set. This is the SSD-lane rotation path; no claiming victory until readiness is green.

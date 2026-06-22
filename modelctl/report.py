@@ -30,7 +30,7 @@ def report_markdown(report: dict[str, Any]) -> str:
     issues = doctor_payload.get("issues", [])
     cleanup = doctor_payload.get("cleanup", {})
     lines = [
-        f"# modelctl report: {model.get('id', 'unknown')}",
+        f"# Capstan report: {model.get('id', 'unknown')}",
         "",
         f"Generated: `{report.get('generated_at')}`",
         f"Overall OK: `{report.get('ok')}`",

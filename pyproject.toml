@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-modelctl"
-version = "0.19.0"
-description = "Manifest-driven lifecycle control for local LLM servers."
+version = "0.20.0"
+description = "Capstan: manifest-driven lifecycle control for giant local LLM servers."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -21,8 +21,9 @@ classifiers = [
 ]
 
 [project.scripts]
+capstan = "capstan.cli:main"
 modelctl = "modelctl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["modelctl*"]
+include = ["capstan*", "modelctl*"]

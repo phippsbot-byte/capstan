@@ -9,7 +9,7 @@ from .manifest import ModelManifest
 
 def bench_markdown(manifest: ModelManifest, result: dict[str, Any]) -> str:
     lines = [
-        f"# modelctl bench: {manifest.id}",
+        f"# Capstan bench: {manifest.id}",
         "",
         f"- model_id: `{manifest.model_id}`",
         f"- endpoint: `{manifest.endpoint}`",
