@@ -1,6 +1,8 @@
-# modelctl
+# Capstan
 
-`modelctl` is a small manifest-driven CLI for running local LLM servers without turning your workstation into a haunted swap machine.
+`capstan` is a small manifest-driven CLI for hauling giant local LLM servers under control without turning your workstation into a haunted swap machine.
+
+The legacy `modelctl` console script remains available during the rename. State paths, manifest filenames, and `MODELCTL_*` environment variables intentionally stay stable in v0.20 so existing services do not drift.
 
 It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom model forks, external SSD model warehouses, sidecars, launch scripts, and "wait, which 140GB directory is live?" cleanup passes.
 
@@ -8,7 +10,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/modelctl/releases/download/v0.19.0/local_modelctl-0.19.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.20.0/local_modelctl-0.20.0-py3-none-any.whl
 ```
 
 For local development:
@@ -20,23 +22,25 @@ python3.11 -m pip install -e .
 Or run module-style:
 
 ```bash
-python3.11 -m modelctl.cli --help
+python3.11 -m capstan --help
+# or
+python3.11 -m capstan.cli --help
 ```
 
 ## Quickstart
 
 ```bash
-modelctl version
+capstan version
 
 # Option A: generate a starter manifest.
-modelctl init --template llama-cpp --model-id local-model --output modelctl.toml
+capstan init --template llama-cpp --model-id local-model --output modelctl.toml
 $EDITOR modelctl.toml
 
 # Option B: build from an MLX artifact.
-modelctl mlx discover --root ~/.cache/mlx-models
-modelctl mlx inspect ~/.cache/mlx-models/my-qwen-model
-modelctl mlx overlay ~/.cache/mlx-models/my-qwen-model
-modelctl mlx manifest ~/.cache/mlx-models/my-qwen-model-served --id my-qwen-model-served --port 8123 --output modelctl.toml --overwrite
+capstan mlx discover --root ~/.cache/mlx-models
+capstan mlx inspect ~/.cache/mlx-models/my-qwen-model
+capstan mlx overlay ~/.cache/mlx-models/my-qwen-model
+capstan mlx manifest ~/.cache/mlx-models/my-qwen-model-served --id my-qwen-model-served --port 8123 --output modelctl.toml --overwrite
 
 # Option C: start from an example.
 cp examples/mlx-lm.example.toml modelctl.toml       # MLX
@@ -44,39 +48,39 @@ cp examples/mlx-lm.example.toml modelctl.toml       # MLX
 $EDITOR modelctl.toml
 
 # Option D: ingest a running OpenAI-compatible endpoint.
-modelctl ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
+capstan ingest --endpoint http://127.0.0.1:8080/v1 --output modelctl.toml --overwrite
 
-modelctl --pretty validate
-modelctl registry add --source modelctl.toml --name my-model
-modelctl registry use my-model --output modelctl.toml --overwrite
-modelctl registry list
-modelctl preflight
-modelctl start --wait
-modelctl smoke
-modelctl soak --count 3
-modelctl bench --preset tiny --output bench.md --format md
-modelctl report --format md --output report.md
-modelctl reports save --format json
-modelctl reports list
-modelctl fleet status
-modelctl fleet health
-modelctl fleet recover             # dry-run recovery plan
-modelctl fleet recover --execute --wait
-modelctl doctor --fix
-modelctl health
-modelctl daemon --iterations 1
-modelctl service install --restart --interval 120 --dry-run
-modelctl service install --restart --interval 120 --overwrite
-modelctl service diff --restart --interval 120
-modelctl service start
-modelctl service status
-modelctl rotate --to candidate.toml --readiness-timeout 300
-modelctl promote --candidate candidate.toml          # plan only
-modelctl promote --candidate candidate.toml --execute --smoke --readiness-timeout 300
-modelctl watchdog --max-swap-gib 4 --duration 0
-modelctl status
-modelctl cleanup          # dry-run
-modelctl stop
+capstan --pretty validate
+capstan registry add --source modelctl.toml --name my-model
+capstan registry use my-model --output modelctl.toml --overwrite
+capstan registry list
+capstan preflight
+capstan start --wait
+capstan smoke
+capstan soak --count 3
+capstan bench --preset tiny --output bench.md --format md
+capstan report --format md --output report.md
+capstan reports save --format json
+capstan reports list
+capstan fleet status
+capstan fleet health
+capstan fleet recover             # dry-run recovery plan
+capstan fleet recover --execute --wait
+capstan doctor --fix
+capstan health
+capstan daemon --iterations 1
+capstan service install --restart --interval 120 --dry-run
+capstan service install --restart --interval 120 --overwrite
+capstan service diff --restart --interval 120
+capstan service start
+capstan service status
+capstan rotate --to candidate.toml --readiness-timeout 300
+capstan promote --candidate candidate.toml          # plan only
+capstan promote --candidate candidate.toml --execute --smoke --readiness-timeout 300
+capstan watchdog --max-swap-gib 4 --duration 0
+capstan status
+capstan cleanup          # dry-run
+capstan stop
 ```
 
 ## Manifest shape
@@ -135,7 +139,7 @@ safe = true
 
 ## Commands
 
-- `version` — print installed modelctl version.
+- `version` — print installed capstan version.
 - `init --template minimal|llama-cpp --output modelctl.toml` — generate a starter manifest.
 - `validate` — parse manifest and print resolved summary; use global `--pretty` for human output.
 - `ingest --endpoint URL --output modelctl.toml` — generate a starter manifest from a running `/v1/models` endpoint.
@@ -157,14 +161,14 @@ safe = true
 - `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults.
 - `doctor --fix` — run diagnostics and apply safe local repairs like stale PID-state removal and state-dir creation.
 - `report --format md --output report.md` — write JSON/Markdown model state reports.
-- `reports save/list/show` — keep/query saved report history under the modelctl state directory.
+- `reports save/list/show` — keep/query saved report history under the compatibility `modelctl` state directory.
 - `smoke` — run OpenAI-compatible `/chat/completions` exact-output smoke.
 - `soak --count N` — run repeated smoke tests with timing and swap sampling.
 - `bench --preset tiny|small|standard --output bench.md --format md` — run synthetic prompt-size benchmarks and write artifacts.
 - `watchdog --max-swap-gib N` — sample readiness/swap and optionally stop the manifest process on breach.
 - `daemon --health-mode --max-swap-delta-gib N [--restart]` — run a foreground supervisor loop using structured health verdicts; restart is explicit only.
 - `daemon --max-swap-gib N [--restart]` — legacy watchdog-style supervisor loop.
-- `service install [--restart] [--health-mode] [--dry-run]` — write a macOS LaunchAgent plist that runs `modelctl daemon` for this manifest.
+- `service install [--restart] [--health-mode] [--dry-run]` — write a macOS LaunchAgent plist that runs the Capstan daemon via the compatibility module for this manifest.
 - `service diff [install-like flags]` — compare the installed LaunchAgent plist to the desired manifest/service options and fail on drift or missing plist.
 - `service start/stop/restart/status/uninstall [--dry-run]` — control the LaunchAgent with `launchctl`; dry-run prints the exact commands.
 - `cleanup` — dry-run cleanup candidates.

@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import tomllib
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -37,6 +38,39 @@ def free_port() -> int:
 
 
 class ModelCtlTests(unittest.TestCase):
+    def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(pyproject["project"]["name"], "local-modelctl")
+        self.assertEqual(pyproject["project"]["version"], "0.20.0")
+        self.assertIn("Capstan", pyproject["project"]["description"])
+        scripts = pyproject["project"]["scripts"]
+        self.assertEqual(scripts["capstan"], "capstan.cli:main")
+        self.assertEqual(scripts["modelctl"], "modelctl.cli:main")
+        package_globs = pyproject["tool"]["setuptools"]["packages"]["find"]["include"]
+        self.assertIn("capstan*", package_globs)
+        self.assertIn("modelctl*", package_globs)
+
+    def test_capstan_module_cli_works_and_help_is_branded(self):
+        package_version = subprocess.run([sys.executable, "-m", "capstan", "version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(package_version.returncode, 0, package_version.stderr + package_version.stdout)
+        self.assertEqual(json.loads(package_version.stdout)["name"], "capstan")
+
+        version = subprocess.run([sys.executable, "-m", "capstan.cli", "version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(version.returncode, 0, version.stderr + version.stdout)
+        body = json.loads(version.stdout)
+        self.assertEqual(body["name"], "capstan")
+        self.assertRegex(body["version"], r"^\d+\.\d+\.\d+$")
+
+        help_result = subprocess.run([sys.executable, "-m", "capstan.cli", "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr + help_result.stdout)
+        self.assertIn("usage: capstan", help_result.stdout)
+        self.assertIn("giant local LLM", help_result.stdout)
+
+    def test_modelctl_module_cli_remains_compatible(self):
+        help_result = subprocess.run([sys.executable, "-m", "modelctl.cli", "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr + help_result.stdout)
+        self.assertIn("usage: modelctl", help_result.stdout)
+
     def test_version_command_avoids_runtime_module_imports(self):
         probe = textwrap.dedent('''
             import contextlib, io, json, sys
@@ -1126,7 +1160,7 @@ class ModelCtlTests(unittest.TestCase):
             bench_out_body = json.loads(bench_out.stdout)
             self.assertTrue(bench_out_body["ok"], bench_out_body)
             self.assertTrue(bench_md.exists())
-            self.assertIn("modelctl bench", bench_md.read_text())
+            self.assertIn("Capstan bench", bench_md.read_text())
             watchdog = subprocess.run(cmd + ["watchdog", "--max-swap-gib", "999999", "--duration", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(watchdog.returncode, 0, watchdog.stderr + watchdog.stdout)
             watchdog_body = json.loads(watchdog.stdout)

@@ -1,3 +1,9 @@
-"""Manifest-driven lifecycle control for local LLM servers."""
+"""Capstan: manifest-driven lifecycle control for giant local LLM servers.
 
-__version__ = "0.19.0"
+The implementation package remains ``modelctl`` for compatibility during the
+Capstan rename. New callers should prefer the ``capstan`` console entry point.
+"""
+
+__version__ = "0.20.0"
+PRODUCT_NAME = "capstan"
+LEGACY_CLI_NAME = "modelctl"

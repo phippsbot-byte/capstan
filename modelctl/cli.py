@@ -5,7 +5,7 @@ import json
 import math
 import sys
 
-from . import __version__
+from . import LEGACY_CLI_NAME, PRODUCT_NAME, __version__
 
 PRETTY = False
 
@@ -234,8 +234,15 @@ def add_service_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
         p.add_argument("--dry-run", action="store_true")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="modelctl", description="Manifest-driven lifecycle control for local LLM servers.")
+def _default_prog() -> str:
+    invoked = sys.argv[0].rsplit("/", 1)[-1]
+    if invoked in {PRODUCT_NAME, LEGACY_CLI_NAME}:
+        return invoked
+    return PRODUCT_NAME
+
+
+def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog or _default_prog(), description="Capstan: manifest-driven lifecycle control for giant local LLM servers.")
     parser.add_argument("-m", "--manifest", default="modelctl.toml", help="Path to model manifest TOML")
     parser.add_argument("--pretty", action="store_true", help="Print human-readable output instead of JSON")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -337,14 +344,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     global PRETTY
-    parser = build_parser()
+    parser = build_parser(prog=prog)
     args = parser.parse_args(argv)
     PRETTY = bool(args.pretty)
     try:
         if args.command == "version":
-            emit({"version": __version__}); return 0
+            emit({"name": PRODUCT_NAME, "compat_cli": LEGACY_CLI_NAME, "version": __version__}); return 0
         if args.command == "init":
             from .init import init_manifest
             result = init_manifest(output=args.output, template=args.template, model_id=args.model_id, endpoint=args.endpoint, ident=args.ident, port=args.port, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
@@ -466,4 +473,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(prog=LEGACY_CLI_NAME))

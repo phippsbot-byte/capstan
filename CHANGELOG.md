@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.20.0
+
+- Rename the public product/CLI to Capstan while preserving `modelctl` as a compatibility console script.
+- Add a `capstan` Python package wrapper so `python -m capstan` and `python -m capstan.cli` work without moving the implementation package yet.
+- Keep the distribution name `local-modelctl` for this release to avoid two packages owning the same compatibility modules; the future PyPI rename can ship with an explicit migration/deprecation path.
+- Keep legacy manifest filenames, state paths, service labels, and `MODELCTL_*` environment variables stable to avoid live LaunchAgent drift.
+
 ## v0.19.0
 
 - Add `modelctl promote --candidate TARGET.toml` as a plan-first promotion workflow around preflight, readiness-gated rotate, candidate post-promotion health/smoke gates, and rollback on failed post-health gates.
