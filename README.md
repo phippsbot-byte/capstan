@@ -10,7 +10,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.22.0/local_modelctl-0.22.0-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.23.0/local_modelctl-0.23.0-py3-none-any.whl
 ```
 
 For local development:
@@ -64,6 +64,7 @@ capstan reports save --format json
 capstan reports list
 capstan fleet status
 capstan fleet health
+capstan fleet doctor              # inventory drift, no endpoint probes
 capstan fleet recover             # dry-run recovery plan
 capstan fleet recover --execute --wait
 capstan doctor --fix
@@ -159,6 +160,7 @@ safe = true
 - `registry add/list/show/remove/use` — manage durable manifest registry entries and materialize a registered manifest into a workspace.
 - `fleet status [--registry DIR] [--jobs N]` — show the operator snapshot across registered manifests: ready/down/dormant/invalid state, PID/log paths, readiness, swap, and LaunchAgent plist presence.
 - `fleet health [--registry DIR] [--jobs N] [--smoke]` — run the structured health verdict across enabled registered manifests and fail if any active lane is critical/invalid/warn; `[fleet] enabled=false` entries are reported as skipped.
+- `fleet doctor [--registry DIR]` — audit registry inventory without endpoint probes: duplicate endpoints/ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents.
 - `fleet recover [--registry DIR] [--jobs N] [--execute] [--wait]` — plan safe starts for down enabled registered manifests with `[start]`; dry-run is parallel-capable, dormant entries are skipped, and real `--execute --wait` recovery stays serial.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.

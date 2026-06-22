@@ -4,13 +4,15 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+import plistlib
 import time
 
 from .manifest import ManifestError, load_manifest
 from .ops import health
 from .registry import list_registry
-from .runner import active_pid, default_log_path, default_pid_path, readiness_check, read_pid_state, start as start_model
-from .service import default_label, service_plist_path
+from .runner import active_pid, default_log_path, default_pid_path, pid_state_owner_mismatch, readiness_check, read_pid_state, start as start_model
+from .service import default_label, launchd_dir, service_plist_path
 from .system import swap_used_gib
 
 
@@ -288,6 +290,145 @@ def fleet_health(
         "elapsed_sec": _elapsed_sec(started),
         "registry_dirs": listing.get("registry_dirs", []),
         "statuses": dict(sorted(counts.items())),
+        "models": rows,
+    }
+
+
+def _row_ident(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("name") or row.get("path"))
+
+
+def _endpoint_port(endpoint: str) -> int | None:
+    try:
+        return urlparse(endpoint).port
+    except ValueError:
+        return None
+
+
+def _modelctl_service_plists() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    directory = launchd_dir()
+    if not directory.exists():
+        return rows
+    for path in sorted(directory.glob("ai.modelctl.*.plist")):
+        try:
+            data = plistlib.loads(path.read_bytes())
+        except Exception as exc:
+            rows.append({"path": str(path), "ok": False, "label": path.stem, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        label = str(data.get("Label") or path.stem)
+        rows.append({"path": str(path), "ok": True, "label": label, "program_arguments": data.get("ProgramArguments", [])})
+    return rows
+
+
+def fleet_doctor(*, registries: list[str] | None = None, limit: int | None = None) -> dict[str, Any]:
+    """Audit registry inventory and service metadata without probing endpoints."""
+    listing = list_registry(registries)
+    entries = listing.get("entries", [])
+    if limit is not None:
+        entries = entries[: max(0, limit)]
+
+    issues: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    started = time.perf_counter()
+
+    endpoint_rows: dict[str, list[str]] = {}
+    port_rows: dict[int, list[str]] = {}
+    expected_service_labels: set[str] = set()
+
+    for entry in entries:
+        row = _base_row(entry)
+        if not entry.get("ok"):
+            row.update({"ok": False, "status": "invalid", "issues": ["manifest_invalid"], "warnings": []})
+            rows.append(row)
+            issues.append({"code": "manifest_invalid", "id": _row_ident(row), "path": entry.get("path"), "error": entry.get("error")})
+            continue
+        try:
+            manifest = load_manifest(Path(str(entry["path"])))
+        except ManifestError as exc:
+            row.update({"ok": False, "status": "invalid", "issues": ["manifest_invalid"], "warnings": [], "error": str(exc)})
+            rows.append(row)
+            issues.append({"code": "manifest_invalid", "id": _row_ident(row), "path": entry.get("path"), "error": str(exc)})
+            continue
+
+        ident = manifest.id
+        expected_service_labels.add(default_label(manifest))
+        endpoint_rows.setdefault(manifest.endpoint, []).append(ident)
+        port = _endpoint_port(manifest.endpoint)
+        if port is not None:
+            port_rows.setdefault(port, []).append(ident)
+
+        row_issues: list[str] = []
+        row_warnings: list[str] = []
+        missing_paths = [path for path in manifest.preflight.required_paths if not Path(path).exists()]
+        if missing_paths:
+            row_issues.append("required_path_missing")
+            issues.append({"code": "required_path_missing", "id": ident, "paths": missing_paths})
+
+        pid_state = read_pid_state(manifest)
+        if pid_state and pid_state_owner_mismatch(manifest, pid_state):
+            row_warnings.append("pid_state_owner_mismatch")
+            warnings.append({"code": "pid_state_owner_mismatch", "id": ident, "pid_state": pid_state, "pid_path": str(default_pid_path(manifest))})
+        elif pid_state and active_pid(manifest) is None:
+            row_warnings.append("stale_pid_state")
+            warnings.append({"code": "stale_pid_state", "id": ident, "pid_state": pid_state, "pid_path": str(default_pid_path(manifest))})
+
+        service_path = service_plist_path(default_label(manifest))
+        row.update({
+            "ok": not row_issues,
+            "status": "warn" if row_issues or row_warnings else "ok",
+            "issues": row_issues,
+            "warnings": row_warnings,
+            "fleet": _fleet_info(manifest),
+            "has_start": manifest.start is not None,
+            "required_paths_missing": missing_paths,
+            "pid_path": str(default_pid_path(manifest)),
+            "pid_state": pid_state,
+            "service": {"label": default_label(manifest), "plist_path": str(service_path), "plist_exists": service_path.exists()},
+        })
+        rows.append(row)
+
+    for endpoint, ids in sorted(endpoint_rows.items()):
+        if len(ids) > 1:
+            issues.append({"code": "duplicate_endpoint", "endpoint": endpoint, "ids": ids})
+            for row in rows:
+                if row.get("id") in ids:
+                    row.setdefault("issues", []).append("duplicate_endpoint")
+                    row["ok"] = False
+                    row["status"] = "warn"
+    for port, ids in sorted(port_rows.items()):
+        if len(ids) > 1:
+            issues.append({"code": "duplicate_port", "port": port, "ids": ids})
+            for row in rows:
+                if row.get("id") in ids:
+                    row.setdefault("issues", []).append("duplicate_port")
+                    row["ok"] = False
+                    row["status"] = "warn"
+
+    service_rows = _modelctl_service_plists()
+    for service in service_rows:
+        label = service.get("label")
+        if label and label not in expected_service_labels:
+            issues.append({"code": "service_orphan", "label": label, "path": service.get("path")})
+            service["orphan"] = True
+        else:
+            service["orphan"] = False
+
+    if not rows:
+        issues.append({"code": "no_models"})
+    summary = {"issues": len(issues), "warnings": len(warnings), "services": len(service_rows), "models": len(rows)}
+    status_name = "critical" if issues else "warn" if warnings else "ok"
+    return {
+        "ok": not issues,
+        "status": status_name,
+        "issues": issues,
+        "warnings": warnings,
+        "summary": summary,
+        "count": len(rows),
+        "elapsed_sec": _elapsed_sec(started),
+        "registry_dirs": listing.get("registry_dirs", []),
+        "services": service_rows,
         "models": rows,
     }
 

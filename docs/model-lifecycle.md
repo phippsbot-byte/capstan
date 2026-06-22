@@ -51,6 +51,7 @@ capstan -m modelctl.toml reports save --format json
 capstan reports list
 capstan fleet status
 capstan fleet health
+capstan fleet doctor
 capstan fleet recover             # dry-run recovery plan
 capstan fleet recover --execute --wait
 capstan -m modelctl.toml doctor --fix
@@ -122,6 +123,14 @@ capstan fleet health
 ```
 
 It scans `$MODELCTL_REGISTRY` plus `~/.config/modelctl/models`, runs the same structured `health` verdict for each enabled manifest, and exits non-zero if any active lane is critical/invalid/warn or if no registered lanes are found. Add `--smoke` only when you want to spend real endpoint calls across the fleet; prompt/completion latency thresholds work there too.
+
+Use `fleet doctor` when you want inventory truth without hitting model endpoints:
+
+```bash
+capstan fleet doctor
+```
+
+It catches duplicate endpoints/ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents. It is intentionally not a liveness probe; use `fleet status` / `fleet health` for runtime state.
 
 When the fleet is down and you want a controlled recovery path, dry-run first:
 

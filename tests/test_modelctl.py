@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.22.0")
+        self.assertEqual(pyproject["project"]["version"], "0.23.0")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -321,6 +321,116 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(recovery_row["state"], "dormant")
             self.assertEqual(recovery_row["planned_action"], "skip")
             self.assertEqual(recovery_row["reason"], "fleet_disabled")
+
+    def test_fleet_doctor_detects_inventory_drift_without_probing_endpoints(self):
+        from modelctl import fleet as fleet_mod
+        from modelctl.service import render_launchd_plist
+        from modelctl.manifest import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            state = root / "state"
+            launchd = root / "launchd"
+            launchd.mkdir()
+            missing = root / "missing-model-dir"
+            pid_state = root / "stale.pid.json"
+            pid_state.write_text(json.dumps({"pid": 99999999, "manifest": str((registry / "dup-a.toml").resolve())}), encoding="utf-8")
+            duplicate_endpoint = "http://127.0.0.1:9901/v1"
+            (registry / "dup-a.toml").write_text(textwrap.dedent(f'''
+                [model]
+                id = "dup-a"
+                model_id = "dup-a-model"
+                endpoint = "{duplicate_endpoint}"
+
+                [start]
+                command = "sleep 60"
+                pid_path = "{pid_state}"
+
+                [preflight]
+                required_paths = ["{missing}"]
+            '''), encoding="utf-8")
+            (registry / "dup-b.toml").write_text(textwrap.dedent(f'''
+                [model]
+                id = "dup-b"
+                model_id = "dup-b-model"
+                endpoint = "{duplicate_endpoint}"
+            '''), encoding="utf-8")
+            orphan_manifest = self.write_manifest(root, '''
+                [model]
+                id = "orphan"
+                model_id = "orphan-model"
+                endpoint = "http://127.0.0.1:9902/v1"
+            ''')
+            orphan = load_manifest(orphan_manifest)
+            orphan_plist = render_launchd_plist(orphan)["plist_xml"]
+            (launchd / "ai.modelctl.orphan.plist").write_text(orphan_plist, encoding="utf-8")
+
+            original_xdg = os.environ.get("XDG_CONFIG_HOME")
+            original_state = os.environ.get("XDG_STATE_HOME")
+            original_launchd = os.environ.get("MODELCTL_LAUNCHD_DIR")
+            original_registry_env = os.environ.get("MODELCTL_REGISTRY")
+            try:
+                os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+                os.environ["XDG_STATE_HOME"] = str(state)
+                os.environ["MODELCTL_LAUNCHD_DIR"] = str(launchd)
+                os.environ.pop("MODELCTL_REGISTRY", None)
+                result = fleet_mod.fleet_doctor(registries=[str(registry)])
+            finally:
+                if original_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = original_xdg
+                if original_state is None:
+                    os.environ.pop("XDG_STATE_HOME", None)
+                else:
+                    os.environ["XDG_STATE_HOME"] = original_state
+                if original_launchd is None:
+                    os.environ.pop("MODELCTL_LAUNCHD_DIR", None)
+                else:
+                    os.environ["MODELCTL_LAUNCHD_DIR"] = original_launchd
+                if original_registry_env is None:
+                    os.environ.pop("MODELCTL_REGISTRY", None)
+                else:
+                    os.environ["MODELCTL_REGISTRY"] = original_registry_env
+
+            self.assertFalse(result["ok"], result)
+            issue_codes = {issue["code"] for issue in result["issues"]}
+            warning_codes = {warning["code"] for warning in result["warnings"]}
+            self.assertIn("duplicate_endpoint", issue_codes)
+            self.assertIn("duplicate_port", issue_codes)
+            self.assertIn("required_path_missing", issue_codes)
+            self.assertIn("service_orphan", issue_codes)
+            self.assertIn("stale_pid_state", warning_codes)
+            self.assertEqual(result["summary"]["issues"], len(result["issues"]))
+            self.assertEqual(result["summary"]["warnings"], len(result["warnings"]))
+
+    def test_fleet_doctor_cli_returns_nonzero_for_inventory_issues(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            missing = root / "missing"
+            (registry / "broken.toml").write_text(textwrap.dedent(f'''
+                [model]
+                id = "broken"
+                model_id = "broken-model"
+                endpoint = "http://127.0.0.1:9910/v1"
+
+                [preflight]
+                required_paths = ["{missing}"]
+            '''), encoding="utf-8")
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+            env["XDG_STATE_HOME"] = str(root / "state")
+            env["MODELCTL_LAUNCHD_DIR"] = str(root / "launchd")
+            env.pop("MODELCTL_REGISTRY", None)
+            result = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "doctor", "--registry", str(registry)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+            body = json.loads(result.stdout)
+            self.assertFalse(body["ok"], body)
+            self.assertIn("required_path_missing", {issue["code"] for issue in body["issues"]})
 
     def write_manifest(self, root: Path, content: str) -> Path:
         path = root / "modelctl.toml"
