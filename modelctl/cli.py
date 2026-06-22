@@ -154,6 +154,8 @@ def add_fleet_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     p_health.add_argument("--sample-sec", type=float, default=None, help="Seconds between swap samples per model")
     p_health.add_argument("--smoke", action="store_true", help="Run each manifest smoke test as part of health")
     p_health.add_argument("--max-latency-sec", type=float, default=None, help="Maximum allowed smoke latency when --smoke is used")
+    p_health.add_argument("--max-prompt-latency-sec", type=float, default=None, help="Maximum allowed server prompt/prefill latency when smoke timings expose it")
+    p_health.add_argument("--max-completion-latency-sec", type=float, default=None, help="Maximum allowed server completion/decode latency when smoke timings expose it")
     p_health.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
     p_health.add_argument("--jobs", type=positive_int, default=None, help="Maximum concurrent health probes; defaults to a bounded parallel scan")
     p_recover = fleet.add_parser("recover", help="Plan or execute safe recovery for down registered models")
@@ -204,6 +206,8 @@ def add_service_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p_install.add_argument("--health-mode", action="store_true", help="Run the daemon with modelctl health verdicts instead of legacy watchdog samples")
     p_install.add_argument("--smoke", action="store_true", help="Health-mode daemon includes manifest smoke test")
     p_install.add_argument("--max-latency-sec", type=float, default=None, help="Health-mode maximum allowed smoke latency")
+    p_install.add_argument("--max-prompt-latency-sec", type=float, default=None, help="Health-mode maximum allowed server prompt/prefill latency")
+    p_install.add_argument("--max-completion-latency-sec", type=float, default=None, help="Health-mode maximum allowed server completion/decode latency")
     p_install.add_argument("--interval", type=float, default=30.0, help="Daemon sample interval seconds")
     p_install.add_argument("--python", default=None, help="Python executable to run modelctl from; defaults to current interpreter")
     p_install.add_argument("--service-log", default=None, help="LaunchAgent stdout log path")
@@ -221,6 +225,8 @@ def add_service_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p_diff.add_argument("--health-mode", action="store_true", help="Desired daemon uses modelctl health verdicts")
     p_diff.add_argument("--smoke", action="store_true", help="Desired health-mode daemon includes manifest smoke test")
     p_diff.add_argument("--max-latency-sec", type=float, default=None, help="Desired health-mode maximum allowed smoke latency")
+    p_diff.add_argument("--max-prompt-latency-sec", type=float, default=None, help="Desired health-mode maximum allowed server prompt/prefill latency")
+    p_diff.add_argument("--max-completion-latency-sec", type=float, default=None, help="Desired health-mode maximum allowed server completion/decode latency")
     p_diff.add_argument("--interval", type=float, default=30.0, help="Desired daemon sample interval seconds")
     p_diff.add_argument("--python", default=None, help="Desired Python executable to run modelctl from")
     p_diff.add_argument("--service-log", default=None, help="Desired LaunchAgent stdout log path")
@@ -300,6 +306,8 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     p_health.add_argument("--sample-sec", type=float, default=None, help="Seconds between swap samples; 0 takes back-to-back samples")
     p_health.add_argument("--smoke", action="store_true", help="Run the manifest smoke test as part of health")
     p_health.add_argument("--max-latency-sec", type=float, default=None, help="Maximum allowed smoke latency when --smoke is used")
+    p_health.add_argument("--max-prompt-latency-sec", type=float, default=None, help="Maximum allowed server prompt/prefill latency when smoke timings expose it")
+    p_health.add_argument("--max-completion-latency-sec", type=float, default=None, help="Maximum allowed server completion/decode latency when smoke timings expose it")
     p_doctor = sub.add_parser("doctor", help="Run preflight, status, cleanup review, and stale-state diagnostics")
     p_doctor.add_argument("--fix", action="store_true", help="Apply safe local repairs such as stale PID removal and state-dir creation")
     p_report = sub.add_parser("report", help="Write a JSON or markdown model state report")
@@ -333,6 +341,8 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     p_daemon.add_argument("--sample-sec", type=float, default=None, help="Health-mode seconds between swap samples")
     p_daemon.add_argument("--smoke", action="store_true", help="Health-mode: include manifest smoke test")
     p_daemon.add_argument("--max-latency-sec", type=float, default=None, help="Health-mode maximum allowed smoke latency")
+    p_daemon.add_argument("--max-prompt-latency-sec", type=float, default=None, help="Health-mode maximum allowed server prompt/prefill latency")
+    p_daemon.add_argument("--max-completion-latency-sec", type=float, default=None, help="Health-mode maximum allowed server completion/decode latency")
     p_daemon.add_argument("--health-mode", action="store_true", help="Use modelctl health verdicts instead of legacy watchdog samples")
     p_daemon.add_argument("--interval", type=float, default=30.0, help="Seconds between supervisor samples")
     p_daemon.add_argument("--iterations", type=int, default=None, help="Stop after N samples; omit to run until interrupted")
@@ -385,7 +395,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             if args.fleet_command == "status":
                 result = fleet_status(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, jobs=args.jobs); emit(result); return 0
             if args.fleet_command == "health":
-                result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, limit=args.limit, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
+                result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, limit=args.limit, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
             if args.fleet_command == "recover":
                 result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
         if args.command == "mlx":
@@ -427,7 +437,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if args.command == "status":
             emit(status(manifest)); return 0
         if args.command == "health":
-            result = health(manifest, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec); emit(result); return 0 if result.get("ok") else 2
+            result = health(manifest, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec); emit(result); return 0 if result.get("ok") else 2
         if args.command == "doctor":
             result = doctor_fix(manifest) if args.fix else doctor(manifest); emit(result); return 0 if result.get("ok") else 2
         if args.command == "report":
@@ -447,16 +457,16 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if args.command == "watchdog":
             result = watchdog(manifest, max_swap_gib=args.max_swap_gib, duration_sec=args.duration, interval_sec=args.interval, stop_on_breach=args.stop_on_breach); emit(result); return 0 if result.get("ok") else 2
         if args.command == "daemon":
-            daemon_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec is not None or args.smoke or args.max_latency_sec is not None)
-            result = daemon(manifest, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=daemon_health_mode, interval_sec=args.interval, iterations=args.iterations, restart=args.restart, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+            daemon_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec is not None or args.smoke or args.max_latency_sec is not None or args.max_prompt_latency_sec is not None or args.max_completion_latency_sec is not None)
+            result = daemon(manifest, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, health_mode=daemon_health_mode, interval_sec=args.interval, iterations=args.iterations, restart=args.restart, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
         if args.command == "service":
             from .service import diff_service, install_service, service_action
             if args.service_command == "install":
-                service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec is not None or args.smoke or args.max_latency_sec is not None)
-                result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
+                service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec is not None or args.smoke or args.max_latency_sec is not None or args.max_prompt_latency_sec is not None or args.max_completion_latency_sec is not None)
+                result = install_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, overwrite=args.overwrite, dry_run=args.dry_run, wait=not args.no_wait); emit(result); return 0 if result.get("ok") else 2
             if args.service_command == "diff":
-                service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec is not None or args.smoke or args.max_latency_sec is not None)
-                result = diff_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, wait=not args.no_wait, include_content=args.content); emit(result); return 0 if result.get("ok") else 2
+                service_health_mode = bool(args.health_mode or args.max_swap_delta_gib is not None or args.sample_sec is not None or args.smoke or args.max_latency_sec is not None or args.max_prompt_latency_sec is not None or args.max_completion_latency_sec is not None)
+                result = diff_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, wait=not args.no_wait, include_content=args.content); emit(result); return 0 if result.get("ok") else 2
             result = service_action(manifest, args.service_command, label=args.label, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "cleanup":
             emit(cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)); return 0

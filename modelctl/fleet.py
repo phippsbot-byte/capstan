@@ -142,6 +142,8 @@ def _fleet_health_row(
     sample_sec: float | None,
     include_smoke: bool,
     max_latency_sec: float | None,
+    max_prompt_latency_sec: float | None,
+    max_completion_latency_sec: float | None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     row = _base_row(entry)
@@ -164,6 +166,8 @@ def _fleet_health_row(
             sample_sec=sample_sec,
             include_smoke=include_smoke,
             max_latency_sec=max_latency_sec,
+            max_prompt_latency_sec=max_prompt_latency_sec,
+            max_completion_latency_sec=max_completion_latency_sec,
         )
         return {
             **row,
@@ -188,6 +192,8 @@ def fleet_health(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    max_prompt_latency_sec: float | None = None,
+    max_completion_latency_sec: float | None = None,
     limit: int | None = None,
     jobs: int | None = None,
 ) -> dict[str, Any]:
@@ -207,6 +213,8 @@ def fleet_health(
             sample_sec=sample_sec,
             include_smoke=include_smoke,
             max_latency_sec=max_latency_sec,
+            max_prompt_latency_sec=max_prompt_latency_sec,
+            max_completion_latency_sec=max_completion_latency_sec,
         ),
         jobs=jobs,
     )
