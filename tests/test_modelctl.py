@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.24.2")
+        self.assertEqual(pyproject["project"]["version"], "0.24.3")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -627,6 +627,76 @@ class ModelCtlTests(unittest.TestCase):
                 self.assertEqual(result["candidate_count"], 0, result)
                 self.assertEqual(result["written_count"], 0, result)
                 self.assertEqual(probed_urls, [], "registered local alias must be skipped before /models probe")
+
+    def test_fleet_intake_skips_registered_reserved_port_before_probe(self):
+        from modelctl import intake as intake_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            port = free_port()
+            (registry / "reserved.toml").write_text(textwrap.dedent(f'''
+                [model]
+                id = "reserved"
+                model_id = "reserved-model"
+                endpoint = "http://remote.example/v1"
+
+                [preflight]
+                exclusive_ports = [{port}]
+            '''), encoding="utf-8")
+
+            original_http_json = intake_mod.http_json
+            probed_urls: list[str] = []
+            def recording_http_json(method, url, payload=None, timeout=30.0):
+                probed_urls.append(url)
+                return 200, {"data": [{"id": "duplicate-port-model"}]}, "{}"
+            try:
+                intake_mod.http_json = recording_http_json
+                result = intake_mod.fleet_intake(registries=[str(registry)], ports=[port], timeout=1)
+            finally:
+                intake_mod.http_json = original_http_json
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["registered_skipped"], 1, result)
+            self.assertEqual(result["candidate_count"], 0, result)
+            self.assertEqual(result["written_count"], 0, result)
+            self.assertEqual(result["skipped"][0]["reason"], "port_reserved")
+            self.assertEqual(probed_urls, [], "reserved port must be skipped before /models probe")
+
+    def test_fleet_intake_does_not_skip_remote_endpoint_with_reserved_local_port(self):
+        from modelctl import intake as intake_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            (registry / "reserved.toml").write_text(textwrap.dedent('''
+                [model]
+                id = "reserved"
+                model_id = "reserved-model"
+                endpoint = "http://127.0.0.1:12345/v1"
+
+                [preflight]
+                exclusive_ports = [54321]
+            '''), encoding="utf-8")
+
+            original_http_json = intake_mod.http_json
+            probed_urls: list[str] = []
+            def recording_http_json(method, url, payload=None, timeout=30.0):
+                probed_urls.append(url)
+                return 200, {"data": [{"id": "remote-port-model"}]}, "{}"
+            try:
+                intake_mod.http_json = recording_http_json
+                result = intake_mod.fleet_intake(registries=[str(registry)], endpoints=["http://remote.example:54321/v1"], timeout=1)
+            finally:
+                intake_mod.http_json = original_http_json
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["registered_skipped"], 0, result)
+            self.assertEqual(result["candidate_count"], 1, result)
+            self.assertEqual(result["written_count"], 0, result)
+            self.assertEqual(probed_urls, ["http://remote.example:54321/v1/models"])
 
     def test_fleet_intake_does_not_collapse_distinct_remote_ipv6_endpoint_keys(self):
         from modelctl import intake as intake_mod
