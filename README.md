@@ -10,7 +10,7 @@ It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom m
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.23.1/local_modelctl-0.23.1-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.0/local_modelctl-0.24.0-py3-none-any.whl
 ```
 
 For local development:
@@ -65,6 +65,7 @@ capstan reports list
 capstan fleet status
 capstan fleet health
 capstan fleet doctor              # inventory drift, no endpoint probes
+capstan fleet intake              # discover live endpoints, draft dormant manifests
 capstan fleet recover             # dry-run recovery plan
 capstan fleet recover --execute --wait
 capstan doctor --fix
@@ -161,6 +162,7 @@ safe = true
 - `fleet status [--registry DIR] [--jobs N]` — show the operator snapshot across registered manifests: ready/down/dormant/invalid state, PID/log paths, readiness, swap, and LaunchAgent plist presence.
 - `fleet health [--registry DIR] [--jobs N] [--smoke]` — run the structured health verdict across enabled registered manifests and fail if any active lane is critical/invalid/warn; `[fleet] enabled=false` entries are reported as skipped.
 - `fleet doctor [--registry DIR]` — audit registry inventory without endpoint probes: duplicate endpoints, duplicate endpoint/reserved ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents.
+- `fleet intake [--port N|--endpoint URL] [--execute]` — discover live OpenAI-compatible endpoints via `/v1/models`, skip already-registered endpoints, and draft disabled `[fleet] enabled=false` manifests with reserved ports. Dry-run unless `--execute` is passed.
 - `fleet recover [--registry DIR] [--jobs N] [--execute] [--wait]` — plan safe starts for down enabled registered manifests with `[start]`; dry-run is parallel-capable, dormant entries are skipped, and real `--execute --wait` recovery stays serial.
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.

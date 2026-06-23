@@ -52,6 +52,7 @@ capstan reports list
 capstan fleet status
 capstan fleet health
 capstan fleet doctor
+capstan fleet intake
 capstan fleet recover             # dry-run recovery plan
 capstan fleet recover --execute --wait
 capstan -m modelctl.toml doctor --fix
@@ -131,6 +132,16 @@ capstan fleet doctor
 ```
 
 It catches duplicate endpoints, duplicate endpoint/reserved ports, missing required paths, stale PID state, and orphaned Capstan LaunchAgents. It is intentionally not a liveness probe; use `fleet status` / `fleet health` for runtime state.
+
+Use `fleet intake` when the box has live OpenAI-compatible endpoints that are not registered yet:
+
+```bash
+capstan fleet intake                         # dry-run: discover listeners and probe /v1/models
+capstan fleet intake --port 8125             # explicit local port
+capstan fleet intake --execute --output-dir ~/.config/modelctl/models
+```
+
+Intake skips endpoints already present in the registry, probes only `/v1/models`, and writes disabled manifests by default: `[fleet] enabled = false` with the endpoint port reserved in `[preflight].exclusive_ports`. It does not smoke, health-check, start, stop, or recover anything. Review the generated manifest before enabling a lane.
 
 When the fleet is down and you want a controlled recovery path, dry-run first:
 

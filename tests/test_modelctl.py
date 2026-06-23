@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.23.1")
+        self.assertEqual(pyproject["project"]["version"], "0.24.0")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -491,6 +491,173 @@ class ModelCtlTests(unittest.TestCase):
             body = json.loads(result.stdout)
             self.assertFalse(body["ok"], body)
             self.assertIn("required_path_missing", {issue["code"] for issue in body["issues"]})
+
+    def test_fleet_intake_dry_run_drafts_dormant_manifest_for_live_openai_endpoint(self):
+        from modelctl.intake import fleet_intake
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            output_dir = root / "out"
+
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+                def do_GET(self):
+                    if self.path == "/v1/models":
+                        data = json.dumps({"object": "list", "data": [{"id": "demo-model"}]}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+
+            server = HTTPServer(("127.0.0.1", 0), H)
+            port = int(server.server_address[1])
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            self.addCleanup(lambda: thread.join(timeout=5))
+
+            result = fleet_intake(registries=[str(registry)], ports=[port], output_dir=str(output_dir), execute=False, timeout=1)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["candidate_count"], 1, result)
+            self.assertEqual(result["written_count"], 0, result)
+            self.assertFalse(output_dir.exists(), "dry-run intake must not write manifests")
+            candidate = result["candidates"][0]
+            self.assertEqual(candidate["model_id"], "demo-model")
+            self.assertEqual(candidate["port"], port)
+            self.assertFalse(candidate["fleet"]["enabled"])
+            self.assertIn("[fleet]", candidate["manifest"])
+
+            manifest_path = root / "candidate.toml"
+            manifest_path.write_text(candidate["manifest"], encoding="utf-8")
+            manifest = load_manifest(manifest_path)
+            self.assertFalse(manifest.fleet.enabled)
+            self.assertEqual(manifest.preflight.exclusive_ports, [port])
+            self.assertEqual(manifest.model_id, "demo-model")
+
+    def test_fleet_intake_execute_writes_dormant_manifest_and_skips_registered_without_probe(self):
+        from modelctl import intake as intake_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            output_dir = root / "out"
+            registry.mkdir()
+            registered_port = free_port()
+            write_registry_manifest(registry, "registered", f"http://127.0.0.1:{registered_port}/v1")
+
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+                def do_GET(self):
+                    if self.path == "/v1/models":
+                        data = json.dumps({"data": [{"id": "new-model"}]}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+
+            server = HTTPServer(("127.0.0.1", 0), H)
+            new_port = int(server.server_address[1])
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            self.addCleanup(lambda: thread.join(timeout=5))
+
+            original_http_json = intake_mod.http_json
+            probed_urls: list[str] = []
+            def recording_http_json(method, url, payload=None, timeout=30.0):
+                probed_urls.append(url)
+                return original_http_json(method, url, payload=payload, timeout=timeout)
+            try:
+                intake_mod.http_json = recording_http_json
+                result = intake_mod.fleet_intake(registries=[str(registry)], ports=[registered_port, new_port], output_dir=str(output_dir), execute=True, timeout=1)
+            finally:
+                intake_mod.http_json = original_http_json
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["registered_skipped"], 1, result)
+            self.assertEqual(result["candidate_count"], 1, result)
+            self.assertEqual(result["written_count"], 1, result)
+            self.assertEqual(probed_urls, [f"http://127.0.0.1:{new_port}/v1/models"])
+            output = Path(result["candidates"][0]["output"])
+            self.assertTrue(output.exists(), result)
+            manifest = load_manifest(output)
+            self.assertFalse(manifest.fleet.enabled)
+            self.assertEqual(manifest.preflight.exclusive_ports, [new_port])
+            self.assertEqual(manifest.endpoint, f"http://127.0.0.1:{new_port}/v1")
+
+    def test_fleet_intake_cli_dry_run_reports_candidates_without_writing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            output_dir = root / "out"
+            registry.mkdir()
+
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+                def do_GET(self):
+                    if self.path == "/v1/models":
+                        data = json.dumps({"data": [{"id": "cli-model"}]}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+
+            server = HTTPServer(("127.0.0.1", 0), H)
+            port = int(server.server_address[1])
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            self.addCleanup(lambda: thread.join(timeout=5))
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(root / "xdg-config")
+            env["XDG_STATE_HOME"] = str(root / "state")
+            env["MODELCTL_LAUNCHD_DIR"] = str(root / "launchd")
+            env.pop("MODELCTL_REGISTRY", None)
+            result = subprocess.run([sys.executable, "-m", "modelctl.cli", "fleet", "intake", "--registry", str(registry), "--port", str(port), "--output-dir", str(output_dir), "--timeout", "1"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            body = json.loads(result.stdout)
+            self.assertTrue(body["ok"], body)
+            self.assertEqual(body["candidate_count"], 1, body)
+            self.assertEqual(body["candidates"][0]["model_id"], "cli-model")
+            self.assertFalse(output_dir.exists(), "dry-run CLI intake must not write manifests")
+
+    def test_fleet_intake_marks_disconnects_unreachable_instead_of_crashing(self):
+        from http.client import RemoteDisconnected
+        from modelctl import intake as intake_mod
+
+        original_http_json = intake_mod.http_json
+        def broken_http_json(method, url, payload=None, timeout=30.0):
+            raise RemoteDisconnected("closed")
+        try:
+            intake_mod.http_json = broken_http_json
+            result = intake_mod.fleet_intake(endpoints=["http://127.0.0.1:9999/v1"], timeout=0.01)
+        finally:
+            intake_mod.http_json = original_http_json
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["candidate_count"], 0, result)
+        self.assertEqual(result["unreachable_count"], 1, result)
+        self.assertIn("RemoteDisconnected", result["unreachable"][0]["error"])
 
     def write_manifest(self, root: Path, content: str) -> Path:
         path = root / "modelctl.toml"
