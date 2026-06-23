@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.24.3
+
+- Make `fleet intake` treat existing manifest `[preflight].exclusive_ports` as reserved local ports, skipping matching candidates before `/v1/models` probes or manifest drafts.
+
 ## v0.24.2
 
 - Fix `fleet intake` endpoint-key canonicalization to preserve IPv6 brackets for non-local literals, preventing distinct remote IPv6 endpoints from being deduped or skipped as the same lane.

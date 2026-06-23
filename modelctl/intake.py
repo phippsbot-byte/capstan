@@ -12,7 +12,7 @@ import http.client
 
 from .http import http_json
 from .ingest import _endpoint_from_models_url, _model_names, _models_url, _q
-from .manifest import load_manifest
+from .manifest import ManifestError, load_manifest
 from .registry import list_registry, safe_stem, selected_registry_dir
 
 
@@ -73,6 +73,14 @@ def _endpoint_port(endpoint: str) -> int | None:
         return urlparse(_normalize_endpoint(endpoint)).port
     except ValueError:
         return None
+
+
+def _endpoint_is_local(endpoint: str) -> bool:
+    try:
+        parsed = urlparse(_normalize_endpoint(endpoint))
+    except ValueError:
+        return False
+    return _canonical_host(parsed.hostname) == LOCAL_HOST
 
 
 def _endpoint_for_port(port: int, host: str = LOCAL_HOST) -> str:
@@ -160,13 +168,21 @@ def discover_listening_ports() -> list[int]:
     return []
 
 
-def _registered_endpoints(registries: list[str] | None = None) -> set[str]:
+def _registered_inventory(registries: list[str] | None = None) -> tuple[set[str], set[int]]:
     endpoints: set[str] = set()
+    reserved_ports: set[int] = set()
     for entry in list_registry(registries).get("entries", []):
         endpoint = entry.get("endpoint")
         if entry.get("ok") and isinstance(endpoint, str):
             endpoints.add(_endpoint_key(endpoint))
-    return endpoints
+        path = entry.get("path")
+        if entry.get("ok") and isinstance(path, str):
+            try:
+                manifest = load_manifest(path)
+            except ManifestError:
+                continue
+            reserved_ports.update(int(p) for p in manifest.preflight.exclusive_ports)
+    return endpoints, reserved_ports
 
 
 def _dedupe_endpoints(endpoints: list[str]) -> list[str]:
@@ -222,7 +238,7 @@ def fleet_intake(
         all_endpoints = all_endpoints[: max(0, limit)]
     candidates_to_check = _dedupe_endpoints(all_endpoints)
 
-    registered = _registered_endpoints(registries)
+    registered, reserved_ports = _registered_inventory(registries)
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     unreachable: list[dict[str, Any]] = []
@@ -234,6 +250,9 @@ def fleet_intake(
         port = _endpoint_port(endpoint)
         if key in registered:
             skipped.append({"reason": "already_registered", "endpoint": endpoint, "port": port})
+            continue
+        if port is not None and port in reserved_ports and _endpoint_is_local(endpoint):
+            skipped.append({"reason": "port_reserved", "endpoint": endpoint, "port": port})
             continue
         probe = _probe_endpoint(endpoint, timeout=timeout)
         if not probe.get("ok"):
