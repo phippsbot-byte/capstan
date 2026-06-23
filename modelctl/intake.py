@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import json
 import re
+import socket
 import subprocess
 import urllib.error
 import http.client
@@ -26,8 +27,37 @@ def _normalize_endpoint(endpoint: str) -> str:
     return text
 
 
+def _local_host_aliases() -> set[str]:
+    aliases = {"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"}
+    # Avoid socket.getfqdn(): CI/container DNS can hang there. Hostname itself is
+    # cheap and catches common local service manifests written with machine names.
+    hostname = socket.gethostname()
+    if hostname:
+        aliases.add(hostname.lower())
+        aliases.add(hostname.split(".", 1)[0].lower())
+    return aliases
+
+
+def _canonical_host(host: str | None) -> str:
+    normalized = (host or "").strip("[]").lower()
+    if normalized in _local_host_aliases():
+        return LOCAL_HOST
+    return normalized
+
+
 def _endpoint_key(endpoint: str) -> str:
-    return _normalize_endpoint(endpoint).rstrip("/")
+    normalized = _normalize_endpoint(endpoint)
+    parsed = urlparse(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        return normalized.rstrip("/")
+    host = _canonical_host(parsed.hostname)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", "", ""))
 
 
 def _endpoint_port(endpoint: str) -> int | None:

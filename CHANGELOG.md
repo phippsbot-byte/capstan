@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.24.1
+
+- Fix `fleet intake` registered-endpoint skipping for local host aliases such as `localhost`, `0.0.0.0`, and `[::1]` so already-registered local lanes are not probed or duplicated.
+
 ## v0.24.0
 
 - Add `fleet intake` to discover live OpenAI-compatible endpoints, skip already-registered lanes, and draft dormant registry manifests from `/v1/models` without start/health/smoke side effects.
