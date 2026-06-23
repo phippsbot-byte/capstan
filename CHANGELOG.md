@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.24.2
+
+- Fix `fleet intake` endpoint-key canonicalization to preserve IPv6 brackets for non-local literals, preventing distinct remote IPv6 endpoints from being deduped or skipped as the same lane.
+
 ## v0.24.1
 
 - Fix `fleet intake` registered-endpoint skipping for local host aliases such as `localhost`, `0.0.0.0`, and `[::1]` so already-registered local lanes are not probed or duplicated.
