@@ -168,6 +168,16 @@ def add_fleet_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     p_doctor = fleet.add_parser("doctor", help="Audit registry inventory and Capstan service metadata without endpoint probes", description="Audit registry inventory and Capstan service metadata without endpoint probes")
     p_doctor.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     p_doctor.add_argument("--limit", type=int, default=None, help="Limit number of registry entries checked")
+    p_intake = fleet.add_parser("intake", help="Discover live OpenAI-compatible endpoints and draft dormant registry manifests", description="Discover live OpenAI-compatible endpoints and draft dormant registry manifests. Dry-run by default; --execute writes manifests.")
+    p_intake.add_argument("--registry", action="append", default=[], help="Extra registry directory to treat as already registered; can be repeated")
+    p_intake.add_argument("--endpoint", action="append", default=[], help="Explicit endpoint base URL to probe, e.g. http://127.0.0.1:8123/v1; can be repeated")
+    p_intake.add_argument("--port", type=positive_int, action="append", default=[], help="Explicit localhost port to probe as http://HOST:PORT/v1; can be repeated")
+    p_intake.add_argument("--host", default="127.0.0.1", help="Host used with --port or automatic listener discovery")
+    p_intake.add_argument("--timeout", type=float, default=1.0, help="Per-endpoint /models probe timeout seconds")
+    p_intake.add_argument("--limit", type=int, default=None, help="Limit number of endpoint candidates checked")
+    p_intake.add_argument("--output-dir", default=None, help="Directory for generated manifests when --execute is set; defaults to the selected registry dir")
+    p_intake.add_argument("--execute", action="store_true", help="Write generated dormant manifests; dry-run by default")
+    p_intake.add_argument("--overwrite", action="store_true", help="Overwrite existing output manifests when --execute is set")
 
 
 def add_mlx_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -403,6 +413,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                 result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
             if args.fleet_command == "doctor":
                 result = fleet_doctor(registries=args.registry, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
+            if args.fleet_command == "intake":
+                from .intake import fleet_intake
+                result = fleet_intake(registries=args.registry, endpoints=args.endpoint, ports=args.port, host=args.host, timeout=args.timeout, output_dir=args.output_dir, execute=args.execute, overwrite=args.overwrite, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
         if args.command == "mlx":
             from .mlx import create_overlay, discover_mlx_models, inspect_mlx_model, write_mlx_manifest
             if args.mlx_command == "discover":

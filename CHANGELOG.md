@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.24.0
+
+- Add `fleet intake` to discover live OpenAI-compatible endpoints, skip already-registered lanes, and draft dormant registry manifests from `/v1/models` without start/health/smoke side effects.
+
 ## v0.23.1
 
 - Fix `fleet doctor` duplicate-port detection to include manifest-owned `[preflight].exclusive_ports`, not just endpoint URL ports.
