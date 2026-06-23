@@ -45,6 +45,14 @@ def _canonical_host(host: str | None) -> str:
     return normalized
 
 
+def _key_netloc(host: str, port: int | None) -> str:
+    # urlparse.hostname strips IPv6 brackets. Put them back for non-local IPv6
+    # literals so `host:port` is not confused with a different IPv6 literal.
+    if ":" in host:
+        return f"[{host}]" if port is None else f"[{host}]:{port}"
+    return host if port is None else f"{host}:{port}"
+
+
 def _endpoint_key(endpoint: str) -> str:
     normalized = _normalize_endpoint(endpoint)
     parsed = urlparse(normalized)
@@ -55,7 +63,7 @@ def _endpoint_key(endpoint: str) -> str:
         port = parsed.port
     except ValueError:
         port = None
-    netloc = host if port is None else f"{host}:{port}"
+    netloc = _key_netloc(host, port)
     path = parsed.path.rstrip("/")
     return urlunparse((parsed.scheme.lower(), netloc, path, "", "", ""))
 

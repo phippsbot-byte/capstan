@@ -41,7 +41,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.24.1")
+        self.assertEqual(pyproject["project"]["version"], "0.24.2")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -627,6 +627,33 @@ class ModelCtlTests(unittest.TestCase):
                 self.assertEqual(result["candidate_count"], 0, result)
                 self.assertEqual(result["written_count"], 0, result)
                 self.assertEqual(probed_urls, [], "registered local alias must be skipped before /models probe")
+
+    def test_fleet_intake_does_not_collapse_distinct_remote_ipv6_endpoint_keys(self):
+        from modelctl import intake as intake_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            registry = root / "registry"
+            registry.mkdir()
+            write_registry_manifest(registry, "registered-ipv6", "http://[2001:db8::1:8080]/v1")
+
+            original_http_json = intake_mod.http_json
+            probed_urls: list[str] = []
+            def recording_http_json(method, url, payload=None, timeout=30.0):
+                probed_urls.append(url)
+                return 200, {"data": [{"id": "remote-ipv6-model"}]}, "{}"
+            try:
+                intake_mod.http_json = recording_http_json
+                result = intake_mod.fleet_intake(registries=[str(registry)], endpoints=["http://[2001:db8::1]:8080/v1"], timeout=1)
+            finally:
+                intake_mod.http_json = original_http_json
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["registered_skipped"], 0, result)
+            self.assertEqual(result["candidate_count"], 1, result)
+            self.assertEqual(result["written_count"], 0, result)
+            self.assertEqual(probed_urls, ["http://[2001:db8::1]:8080/v1/models"])
+            self.assertEqual(result["candidates"][0]["endpoint"], "http://[2001:db8::1]:8080/v1")
 
     def test_fleet_intake_cli_dry_run_reports_candidates_without_writing(self):
         with tempfile.TemporaryDirectory() as td:
