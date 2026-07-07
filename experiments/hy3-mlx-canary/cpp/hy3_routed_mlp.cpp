@@ -147,6 +147,37 @@ static uint64_t span_nbytes_for_route(const std::unordered_map<uint64_t, Span> &
   return it->second.nbytes;
 }
 
+struct DenseExpertBank {
+  DenseQ4Affine up;
+  DenseQ4Affine gate;
+  DenseQ4Affine down;
+};
+
+static DenseExpertBank dequantize_expert_bank(const ExpertBank &bank) {
+  DenseExpertBank dense;
+  qlinear_dequantize(bank.up_w, bank.up_s, bank.up_b, 1536, 4096, 512, 64, dense.up);
+  qlinear_dequantize(bank.gate_w, bank.gate_s, bank.gate_b, 1536, 4096, 512, 64, dense.gate);
+  qlinear_dequantize(bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, dense.down);
+  return dense;
+}
+
+static void compute_expert_route_dense(
+    const DenseExpertBank &bank,
+    const std::vector<float> &x,
+    size_t route,
+    std::vector<float> &route_outputs,
+    std::vector<float> &up,
+    std::vector<float> &gate,
+    std::vector<float> &hidden,
+    std::vector<float> &down) {
+  qlinear_dense(x, bank.up, up);
+  qlinear_dense(x, bank.gate, gate);
+  hidden.resize(1536);
+  for (int i = 0; i < 1536; ++i) hidden[static_cast<size_t>(i)] = silu(gate[static_cast<size_t>(i)]) * up[static_cast<size_t>(i)];
+  qlinear_dense(hidden, bank.down, down);
+  std::copy(down.begin(), down.end(), route_outputs.begin() + route * 4096);
+}
+
 static void apply_expert_route(
     const ExpertBank &bank,
     const std::vector<float> &x,
@@ -199,20 +230,28 @@ RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::v
       }
     }
   } else {
-    std::unordered_map<int, ExpertBank> banks;
-    banks.reserve(unique_experts.size());
+    std::vector<float> route_outputs(static_cast<size_t>(fx.seq_len) * static_cast<size_t>(fx.topk) * 4096, 0.0f);
     for (int expert : unique_experts) {
       ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, expert);
       result.bytes_read += bank.raw.size();
       ++result.read_calls;
-      banks.emplace(expert, std::move(bank));
+      DenseExpertBank dense_bank = dequantize_expert_bank(bank);
+      for (int token = 0; token < fx.seq_len; ++token) {
+        std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
+        for (int k = 0; k < fx.topk; ++k) {
+          size_t route = static_cast<size_t>(token * fx.topk + k);
+          if (fx.experts_flat[route] != expert) continue;
+          compute_expert_route_dense(dense_bank, x, route, route_outputs, up, gate, hidden, down);
+        }
+      }
     }
     for (int token = 0; token < fx.seq_len; ++token) {
-      std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
       for (int k = 0; k < fx.topk; ++k) {
         size_t route = static_cast<size_t>(token * fx.topk + k);
-        const ExpertBank &bank = banks.at(fx.experts_flat[route]);
-        apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down);
+        float weight = fx.route_weights_flat[route];
+        size_t token_base = static_cast<size_t>(token) * 4096;
+        size_t route_base = route * 4096;
+        for (int i = 0; i < 4096; ++i) result.actual[token_base + static_cast<size_t>(i)] += weight * route_outputs[route_base + static_cast<size_t>(i)];
       }
     }
   }

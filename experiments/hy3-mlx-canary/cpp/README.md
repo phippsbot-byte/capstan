@@ -179,8 +179,8 @@ layer-major dedup, and passed with worst relative-to-expected error `0.0141305`.
 Layer-major replay of the same fixtures read each unique expert once per layer,
 reducing to **1,408** reads / **13.9219GiB** and saving **172** reads /
 **1.70068GiB**, with the same parity verdict. With the Apple Accelerate-backed
-qlinear path, the order-preserving layer-major replay wall is **114.95s**. A
-duplicate-token regression (`/tmp/hy3-layer1-top5-bos-dup2.json`) confirms the
+qlinear path and expert-major dense reuse, the order-preserving layer-major replay
+wall is **113.84s**. A duplicate-token regression (`/tmp/hy3-layer1-top5-bos-dup2.json`) confirms the
 gate catches true prompt reuse: `10` naïve reads collapse to `5` unique reads.
 
 A 16-token all-layer fixture export also succeeds:
@@ -189,6 +189,6 @@ Python/MLX exported **79** fixtures with `seq_len=16`, sidecar read **29.752075G
 forward-to-layer wall **97.636s**, and swap delta **0.0GiB**. Full C++ layer-major
 replay passed all 79 layers with **3,009** unique reads vs **6,320** naïve route
 reads, saving **3,311** reads / **32.7382GiB**; worst relative-to-expected error
-was `0.0157937`. Apple Accelerate qlinear cuts the order-preserving layer-major
-wall from **899.48s** to **450.73s**. Next compute cut is reusing dequantized
-expert matrices across repeated prompt routes and then Metal/SIMD kernels.
+was `0.0157937`. Apple Accelerate qlinear plus expert-major dense reuse cuts the
+order-preserving layer-major wall from **899.48s** to **239.45s**. Next compute
+cut is route-trace/prompt execution plumbing and then lower-level Metal/SIMD kernels.

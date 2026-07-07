@@ -51,16 +51,17 @@ void qlinear_reference(const std::vector<float> &x, const TensorSlice &w, const 
   }
 }
 
-#ifdef __APPLE__
-static void dequant_q4_affine_dense(const TensorSlice &w, const TensorSlice &s, const TensorSlice &b, int out_dim, int in_dim, int packed_words, int groups, std::vector<float> &dense) {
+void qlinear_dequantize(const TensorSlice &w, const TensorSlice &s, const TensorSlice &b, int out_dim, int in_dim, int packed_words, int groups, DenseQ4Affine &dense) {
   if (in_dim > packed_words * 8) throw std::runtime_error("qlinear packed weight width too small");
   if (groups < ((in_dim + 63) / 64)) throw std::runtime_error("qlinear scale group count too small");
-  dense.assign(static_cast<size_t>(out_dim) * static_cast<size_t>(in_dim), 0.0f);
+  dense.out_dim = out_dim;
+  dense.in_dim = in_dim;
+  dense.weights.resize(static_cast<size_t>(out_dim) * static_cast<size_t>(in_dim));
   for (int o = 0; o < out_dim; ++o) {
     const uint8_t *wrow = w.ptr + static_cast<size_t>(o) * static_cast<size_t>(packed_words) * 4;
     const uint8_t *srow = s.ptr + static_cast<size_t>(o) * static_cast<size_t>(groups) * 2;
     const uint8_t *brow = b.ptr + static_cast<size_t>(o) * static_cast<size_t>(groups) * 2;
-    float *dense_row = dense.data() + static_cast<size_t>(o) * static_cast<size_t>(in_dim);
+    float *dense_row = dense.weights.data() + static_cast<size_t>(o) * static_cast<size_t>(in_dim);
     for (int g = 0; g < groups; ++g) {
       const int group_start = g * 64;
       if (group_start >= in_dim) break;
@@ -75,24 +76,33 @@ static void dequant_q4_affine_dense(const TensorSlice &w, const TensorSlice &s, 
     }
   }
 }
-#endif
 
-void qlinear(const std::vector<float> &x, const TensorSlice &w, const TensorSlice &s, const TensorSlice &b, int out_dim, int in_dim, int packed_words, int groups, std::vector<float> &out) {
+void qlinear_dense(const std::vector<float> &x, const DenseQ4Affine &dense, std::vector<float> &out) {
+  if (static_cast<int>(x.size()) < dense.in_dim) throw std::runtime_error("qlinear_dense input too short");
+  out.assign(dense.out_dim, 0.0f);
 #ifdef __APPLE__
-  thread_local std::vector<float> dense;
-  dequant_q4_affine_dense(w, s, b, out_dim, in_dim, packed_words, groups, dense);
-  out.assign(out_dim, 0.0f);
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-  cblas_sgemv(CblasRowMajor, CblasNoTrans, out_dim, in_dim, 1.0f, dense.data(), in_dim, x.data(), 1, 0.0f, out.data(), 1);
+  cblas_sgemv(CblasRowMajor, CblasNoTrans, dense.out_dim, dense.in_dim, 1.0f, dense.weights.data(), dense.in_dim, x.data(), 1, 0.0f, out.data(), 1);
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
 #else
-  qlinear_reference(x, w, s, b, out_dim, in_dim, packed_words, groups, out);
+  for (int o = 0; o < dense.out_dim; ++o) {
+    const float *row = dense.weights.data() + static_cast<size_t>(o) * static_cast<size_t>(dense.in_dim);
+    float acc = 0.0f;
+    for (int i = 0; i < dense.in_dim; ++i) acc += x[static_cast<size_t>(i)] * row[i];
+    out[static_cast<size_t>(o)] = acc;
+  }
 #endif
+}
+
+void qlinear(const std::vector<float> &x, const TensorSlice &w, const TensorSlice &s, const TensorSlice &b, int out_dim, int in_dim, int packed_words, int groups, std::vector<float> &out) {
+  thread_local DenseQ4Affine dense;
+  qlinear_dequantize(w, s, b, out_dim, in_dim, packed_words, groups, dense);
+  qlinear_dense(x, dense, out);
 }
 
 float silu(float x) {
