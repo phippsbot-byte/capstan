@@ -1,0 +1,80 @@
+{
+  "compiler": [
+    "Apple clang version 21.0.0 (clang-2100.0.123.102)",
+    "Target: arm64-apple-darwin25.4.0"
+  ],
+  "created_at": "2026-07-07",
+  "host": "macOS-26.4.1-arm64-arm-64bit",
+  "notes": "Filesystem was warm from prior Hy3 runs; this validates native C++ compact-index parsing and one contiguous pread per expert span, not cold-drive worst case.",
+  "runs": [
+    {
+      "name": "plan_full_top8_no_read",
+      "result": {
+        "bytes_read": 0,
+        "checksum_fnv1a64": "0x14650fb0739d0383",
+        "checksum_mode": "sample",
+        "expert_spans": 15168,
+        "gib_per_s": 0,
+        "gib_read": 0,
+        "index": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv",
+        "index_entries": 136512,
+        "index_load_s": 1.38608,
+        "iterations": 1,
+        "no_read": true,
+        "ok": true,
+        "planned_bytes_per_iter": 6709837824,
+        "planned_spans": 632,
+        "read_calls": 0,
+        "read_elapsed_s": 0,
+        "root": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar"
+      },
+      "wall_s": 1.751
+    },
+    {
+      "name": "layer1_top8_read_sample",
+      "result": {
+        "bytes_read": 84934656,
+        "checksum_fnv1a64": "0x71ee6d2d6ebd0576",
+        "checksum_mode": "sample",
+        "expert_spans": 15168,
+        "gib_per_s": 2.77974,
+        "gib_read": 0.0791016,
+        "index": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv",
+        "index_entries": 136512,
+        "index_load_s": 1.03464,
+        "iterations": 1,
+        "no_read": false,
+        "ok": true,
+        "planned_bytes_per_iter": 84934656,
+        "planned_spans": 8,
+        "read_calls": 8,
+        "read_elapsed_s": 0.0284565,
+        "root": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar"
+      },
+      "wall_s": 1.084
+    },
+    {
+      "name": "full_top8_all_layers_read_sample",
+      "result": {
+        "bytes_read": 6709837824,
+        "checksum_fnv1a64": "0x1e173ad573437fa4",
+        "checksum_mode": "sample",
+        "expert_spans": 15168,
+        "gib_per_s": 2.00438,
+        "gib_read": 6.24902,
+        "index": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv",
+        "index_entries": 136512,
+        "index_load_s": 0.97455,
+        "iterations": 1,
+        "no_read": false,
+        "ok": true,
+        "planned_bytes_per_iter": 6709837824,
+        "planned_spans": 632,
+        "read_calls": 632,
+        "read_elapsed_s": 3.11769,
+        "root": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar"
+      },
+      "wall_s": 4.185
+    }
+  ]
+}

@@ -272,13 +272,29 @@ Added tiny OpenAI-compatible canary server: `/Users/nb/LLM/hy3-mlx-canary/hy3_op
 
 Do **not** rerun flat MLX.
 
-Next useful work:
+Current decision:
 
-1. Keep two lanes distinct: **fair full top-8** (`slot-bank 16`) vs **fast approximate top-4** (`slot-bank 32`). Do not mix their scores.
-2. For re-eval, start with a tiny local slice through `hy3_openai_server.py` before any full Phipps run; the server path now works but prompt-prefill IO is still expensive.
-3. Add prompt/prefix cache reuse for repeated eval scaffolding; tool-template prompts currently explode prefill cost.
-4. Profile packed reader vs original reader at the per-expert and per-layer level; the Python hot path is now less scary, but prefill IO remains ugly.
-5. Only after tiny slice quality is sane, run a signed-off Phipps eval and label the lane clearly (`top8 fair` vs `top4 approximate`).
+1. Freeze Python serving at **top5/slot16 + prefix prewarm + expert-cache clear** for canary/operator checks only.
+2. Do not keep brute-tuning Python `topk` / slot-bank combos; top6 was slower and worse than top5 on the tiny Phipps slice.
+3. Move the serious path into Capstan/C++ layer-major prefill/decode.
+
+## Capstan/C++ sidecar IO substrate — 2026-07-07
+
+Added first native substrate:
+
+- `hy3_emit_compact_index.py` emits a compact TSV index from the huge packed JSON manifest.
+- `cpp/hy3_sidecar_io.cpp` builds with CMake/Apple clang and reads one contiguous span per `(layer, expert)` from the packed sidecar.
+- artifact: `cpp/results/20260707-sidecar-io.json`
+
+Verified on the Studio:
+
+| Probe | Planned spans | Read calls | Payload | Read wall | Throughput | Checksum |
+|---|---:|---:|---:|---:|---:|---|
+| plan full top8, no read | 632 | 0 | 6.249GiB planned | 0s | - | `0x14650fb0739d0383` |
+| layer1 top8 read | 8 | 8 | 0.079GiB | 0.028s | 2.78GiB/s | `0x71ee6d2d6ebd0576` |
+| all MoE layers top8 read | 632 | 632 | 6.249GiB | 3.118s | 2.00GiB/s | `0x1e173ad573437fa4` |
+
+This is warm-filesystem IO, not a cold-drive worst case. Still, native sidecar IO is now clearly cheap enough to proceed. Next C++ step: wire this substrate into layer-major prefill/decode kernels and stop using Python/MLX request glue as the product path.
 
 ## DS4 lane cleanup
 
