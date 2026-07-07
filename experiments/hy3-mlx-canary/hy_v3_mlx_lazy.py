@@ -304,6 +304,16 @@ def sync_timers_enabled() -> bool:
     return env_truthy("HY3_SYNC_TIMERS")
 
 
+def effective_top_k(default: int) -> int:
+    raw = os.environ.get("HY3_TOPK_CAP")
+    if raw is None or raw == "":
+        return default
+    cap = int(raw)
+    if cap < 1:
+        raise ValueError(f"HY3_TOPK_CAP must be >= 1, got {cap}")
+    return min(default, cap)
+
+
 def eval_for_timing(*arrays: Any) -> None:
     mx.eval(*arrays)
     if sync_timers_enabled() and hasattr(mx, "synchronize"):
@@ -447,15 +457,36 @@ class LazySwitchGLU(nn.Module):
     def _remap_indices(self, indices: mx.array) -> tuple[list[int], mx.array]:
         mx.eval(indices)
         idx_np = np.array(indices, copy=False)
-        values, counts = np.unique(idx_np, return_counts=True)
-        pairs = [(int(value), int(count)) for value, count in zip(values, counts)]
-        # Load least-frequent experts first so a bounded LRU retains the most
-        # reused prompt experts after the layer finishes. Set
-        # HY3_RETAIN_FREQUENT_EXPERTS=0 to fall back to stable expert-id order.
+        flat = idx_np.reshape(-1)
+        values, counts = np.unique(flat, return_counts=True)
+        counts_by_id = {int(value): int(count) for value, count in zip(values, counts)}
+        last_by_id: dict[int, int] = {}
+        for pos_idx, value in enumerate(flat):
+            last_by_id[int(value)] = pos_idx
+
+        # Load less valuable experts first so a bounded LRU retains the policy's
+        # preferred experts after prompt prefill. Set HY3_RETAIN_FREQUENT_EXPERTS=0
+        # or HY3_RETAIN_POLICY=id to restore stable expert-id order.
+        policy = os.environ.get("HY3_RETAIN_POLICY", "").lower().replace("-", "_")
         if os.environ.get("HY3_RETAIN_FREQUENT_EXPERTS", "1").lower() in {"0", "false", "no", "off"}:
-            unique = [expert_id for expert_id, _ in sorted(pairs)]
+            policy = "id"
+        if not policy:
+            policy = "freq"
+
+        expert_ids = [int(value) for value in values]
+        if policy == "id":
+            unique = sorted(expert_ids)
+        elif policy == "last":
+            unique = sorted(expert_ids, key=lambda expert_id: (last_by_id[expert_id], expert_id))
+        elif policy == "freq_last":
+            unique = sorted(expert_ids, key=lambda expert_id: (counts_by_id[expert_id], last_by_id[expert_id], expert_id))
+        elif policy == "last_freq":
+            unique = sorted(expert_ids, key=lambda expert_id: (last_by_id[expert_id], counts_by_id[expert_id], expert_id))
+        elif policy == "freq":
+            unique = sorted(expert_ids, key=lambda expert_id: (counts_by_id[expert_id], expert_id))
         else:
-            unique = [expert_id for expert_id, _ in sorted(pairs, key=lambda item: (item[1], item[0]))]
+            raise ValueError(f"unsupported HY3_RETAIN_POLICY={policy!r}")
+
         pos = {expert_id: i for i, expert_id in enumerate(unique)}
         remapped_np = np.vectorize(pos.__getitem__, otypes=[np.int32])(idx_np)
         return unique, mx.array(remapped_np, dtype=mx.int32)
@@ -532,7 +563,7 @@ class Hy3MoE(nn.Module):
             if self.router.expert_bias is not None:
                 selection_scores = selection_scores + self.router.expert_bias
 
-            k = self.top_k
+            k = effective_top_k(self.top_k)
             inds = mx.stop_gradient(mx.argpartition(-selection_scores, kth=k - 1, axis=-1)[..., :k])
             selected_scores = mx.take_along_axis(scores, inds, axis=-1)
             if self.route_norm and k > 1:
@@ -558,7 +589,7 @@ class Hy3MoE(nn.Module):
         selection_scores = scores
         if self.router.expert_bias is not None:
             selection_scores = selection_scores + self.router.expert_bias
-        k = self.top_k
+        k = effective_top_k(self.top_k)
         inds = mx.stop_gradient(mx.argpartition(-selection_scores, kth=k - 1, axis=-1)[..., :k])
         selected_scores = mx.take_along_axis(scores, inds, axis=-1)
         if self.route_norm and k > 1:

@@ -381,6 +381,8 @@ def main() -> None:
     parser.add_argument("--disable-shared-mlp", action="store_true", help="diagnostic only: skip Hy3 shared expert/resident MLP contribution")
     parser.add_argument("--disable-routed-mlp", action="store_true", help="diagnostic only: skip Hy3 routed expert contribution")
     parser.add_argument("--sync-timers", action="store_true", help="call mx.synchronize() after timed evals for honest MLX timing")
+    parser.add_argument("--retain-policy", choices=["id", "freq", "last", "freq-last", "last-freq"], help="expert cache retention policy after prompt prefill")
+    parser.add_argument("--topk-cap", type=int, help="experimental cap for routed experts per token; default uses model top-k")
     args = parser.parse_args()
 
     if args.profile_layers:
@@ -391,6 +393,10 @@ def main() -> None:
         os.environ["HY3_DISABLE_ROUTED_MLP"] = "1"
     if args.sync_timers:
         os.environ["HY3_SYNC_TIMERS"] = "1"
+    if args.retain_policy:
+        os.environ["HY3_RETAIN_POLICY"] = args.retain_policy.replace("-", "_")
+    if args.topk_cap is not None:
+        os.environ["HY3_TOPK_CAP"] = str(args.topk_cap)
 
     guard = start_swap_guard(args.max_swap_gib, args.max_swap_delta_gib)
     result: dict[str, Any]
@@ -414,6 +420,11 @@ def main() -> None:
         # Give watchdog one last sample window in long runs.
         time.sleep(0.1)
 
+    result["experiment"] = {
+        "slot_bank": args.slot_bank,
+        "retain_policy": os.environ.get("HY3_RETAIN_POLICY") or ("id" if os.environ.get("HY3_RETAIN_FREQUENT_EXPERTS", "1").lower() in {"0", "false", "no", "off"} else "freq"),
+        "topk_cap": int(os.environ["HY3_TOPK_CAP"]) if os.environ.get("HY3_TOPK_CAP") else None,
+    }
     result["swap"] = {
         "start_gib": round(guard["start_gib"], 3),
         "last_gib": round(guard["last_gib"], 3),

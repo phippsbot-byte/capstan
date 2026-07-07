@@ -253,7 +253,20 @@ Slot-bank 16 with frequency retention:
 - swap delta: **0.0GiB**
 - artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/packed-generate-cache-chatlite-gcfix-slot16-freqretain.json`
 
-This is a cheap win and keeps slot 16 as the default safe policy. Next optimization should target prefill read volume directly, but cache retention order now stops throwing away the most useful prompt experts.
+This is a cheap win and keeps slot 16 as the default safe **full top-8** policy. Next optimization should target prefill read volume directly, but cache retention order now stops throwing away the most useful prompt experts.
+
+Experimental top-k cap / fast lane:
+
+Added optional `HY3_TOPK_CAP` / `--topk-cap` for approximate local serving. This is **not** fair full-Hy3 behavior; it is a speed/quality tradeoff for making the 295B route usable on the 96GB Studio.
+
+| Lane | Result |
+|---|---|
+| top-4, slot 16, `pong` | exact `pong`; **5.512s / 0.684s / 0.486s**; reads **22.781GiB**; swap delta **0.0GiB** |
+| top-4, slot 32, `pong` | exact `pong`; **4.287s / 0.387s / 0.405s**; reads **22.050GiB**; swap delta **0.0GiB** |
+| top-4, slot 32, exact JSON | exact `{\"ok\":true}`; **7.500s** prefill then **0.25-0.45s/token**; reads **28.991GiB**; swap delta **0.0GiB** |
+| top-4, slot 32, tool-shaped JSON | exact `{\"tool\":\"calculator\",\"arguments\":{\"expression\":\"17*23\"}}`; **13.643s** prefill then ~**0.5-0.7s/token**; reads **59.692GiB**; swap delta **0.0GiB** |
+
+Added tiny OpenAI-compatible canary server: `/Users/nb/LLM/hy3-mlx-canary/hy3_openai_server.py`. It serves `/v1/models`, `/health`, and `/v1/chat/completions`, renders the real Hy3 chat template with `reasoning_effort=no_think`, and parses Hy3 `<tool_calls>` into OpenAI-style `tool_calls`. Smoke on port `8133` passed exact `pong`, exact JSON, and a calculator tool-call request. The tool-template path is still expensive because the template expands to ~196 prompt tokens; that is a serving/runtime cost issue, not a model-format blocker.
 
 ## Next engineering step
 
@@ -261,11 +274,11 @@ Do **not** rerun flat MLX.
 
 Next useful work:
 
-1. Add DeepSeek-style layer-major prefill dedup: for each layer, route all prompt tokens, dedup unique experts, load each expert once, reuse across token refs.
-2. Profile packed reader vs original reader at the per-expert and per-layer level; the Python hot path is now suspect.
-3. Keep slot-bank 8/16 for first safety; only revisit 32 after prefill memory is stable.
-4. Add a tiny local server only after cached generation can produce `pong` with low swap delta.
-5. Then run exact JSON and a minimal tool-call probe.
+1. Keep two lanes distinct: **fair full top-8** (`slot-bank 16`) vs **fast approximate top-4** (`slot-bank 32`). Do not mix their scores.
+2. For re-eval, start with a tiny local slice through `hy3_openai_server.py` before any full Phipps run; the server path now works but prompt-prefill IO is still expensive.
+3. Add prompt/prefix cache reuse for repeated eval scaffolding; tool-template prompts currently explode prefill cost.
+4. Profile packed reader vs original reader at the per-expert and per-layer level; the Python hot path is now less scary, but prefill IO remains ugly.
+5. Only after tiny slice quality is sane, run a signed-off Phipps eval and label the lane clearly (`top8 fair` vs `top4 approximate`).
 
 ## DS4 lane cleanup
 
