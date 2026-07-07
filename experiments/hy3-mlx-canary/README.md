@@ -39,5 +39,6 @@ After removing explicit per-expert `gc.collect()` from the hot path:
 - first C++20 substrate lives under `cpp/`: compact TSV sidecar index + contiguous expert-span `pread`; full top-8 all-layer expert payload reads 6.249GiB / 632 spans in ~3.2s warm-cache on the Studio
 - native slot-bank/cache scheduler now models layer-major read pressure before kernel work; top8 fixed 4-token trace at slot16 reads once then hits cache, top5 hot 8-token trace reads 7.811GiB with no evictions, adversarial top5 rolling churn reads 31.245GiB and evicts 1,896 spans
 - real router trace capture/replay now works end-to-end; top5/slot16 prefill+decode trace replays 20.853GiB with 1,051 hits / 2,109 misses / 845 evictions through native C++
+- one-layer routed parity now passes: native q4 affine `up/gate/down + swiglu + route weighting` matches Python/MLX for layer1 top5 BOS with max abs error `4.69808e-05`
 
-Next useful work: wire the native trace path into layer-major prefill/decode kernels. Python canary work should be frozen unless a very specific smoke needs it.
+Next useful work: scale the native parity path from one routed layer into layer-major prefill/decode execution. Python canary work should be frozen unless a very specific smoke needs it.

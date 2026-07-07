@@ -316,7 +316,20 @@ Real router trace capture/replay is now implemented:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | top5/slot16 `generate-cache`, prompt `Reply with exactly pong.`, 3 generated-token attempts | 632 | 3,160 | 1,051 | 2,109 | 845 | 20.853GiB | 6.648s | 12.498GiB |
 
-Python live run for the same trace read **20.873GiB** and took **50.639s / 2.665s / 2.658s** across prefill/decode steps. C++ replay is not doing compute, but it now gives an apples-ish native IO/cache pressure model for real router decisions. Next C++ step: wire layer-major prefill/decode kernels against this trace path and stop using Python/MLX request glue as the product path.
+Python live run for the same trace read **20.873GiB** and took **50.639s / 2.665s / 2.658s** across prefill/decode steps. C++ replay is not doing compute, but it now gives an apples-ish native IO/cache pressure model for real router decisions.
+
+One-layer routed parity is now implemented:
+
+- Python fixture exporter: `hy3_export_layer_fixture.py`.
+- Fixture: `cpp/fixtures/hy3-layer1-top5-bos.json`.
+- Live artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-112829/`.
+- C++ replay path: `hy3_sidecar_io --fixture cpp/fixtures/hy3-layer1-top5-bos.json`.
+
+| Parity fixture | Experts | Payload read | Compute wall | Max abs error | Mean abs error | RMSE | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| layer1 top5 BOS routed MoE, before shared MLP | 5 | 0.049438GiB | 0.426s | `4.69808e-05` | `3.62875e-06` | `4.94604e-06` | pass `<1e-4` |
+
+Interpretation: native code can now materialize selected expert banks from the packed sidecar, dequantize MLX q4 affine weights, run `up/gate/down + swiglu + route weighting`, and match Python/MLX for one routed layer. Next C++ step: scale this from one layer fixture to layer-major prefill/decode execution and stop using Python/MLX request glue as the product path.
 
 ## DS4 lane cleanup
 

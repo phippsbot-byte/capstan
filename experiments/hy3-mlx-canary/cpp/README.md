@@ -101,3 +101,29 @@ HY3_SIDECAR_LAYOUT=/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifes
 
 First real trace artifact:
 `/Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/20260707-102115/`.
+
+## One-layer routed parity fixture
+
+Python can now export a compact routed-MoE parity fixture from a real hidden
+state/router decision:
+
+```bash
+/opt/homebrew/bin/python3.11 hy3_export_layer_fixture.py \
+  --layer 1 --token 0 --slot-bank 16 --topk-cap 5 \
+  --out /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>/hy3-layer1-top5-bos.json
+```
+
+The committed fixture is `cpp/fixtures/hy3-layer1-top5-bos.json`.
+Native replay materializes the selected expert banks from the packed sidecar,
+dequantizes MLX q4 affine weights, runs `up/gate/down + swiglu + route weighting`,
+and compares against Python/MLX:
+
+```bash
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --fixture cpp/fixtures/hy3-layer1-top5-bos.json
+```
+
+Current result: `parity_pass=true`, max abs error `4.69808e-05`, mean abs error
+`3.62875e-06`, RMSE `4.94604e-06`, 5 expert spans / `0.049438GiB` read.

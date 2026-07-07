@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -44,6 +46,7 @@ struct Args {
   fs::path index;
   fs::path root;
   fs::path trace;
+  fs::path fixture;
   std::optional<int> layer;
   std::vector<int> explicit_layers;
   std::vector<int> experts;
@@ -86,7 +89,7 @@ static std::vector<int> parse_layers(const std::string &s) {
 
 static void usage() {
   std::cerr << "usage: hy3_sidecar_io --index compact-index.tsv --root sidecar-root "
-               "(--trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
+               "(--fixture parity.json | --trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
                "[--simulate-tokens N --slot-bank N --policy lru|freq --route-pattern fixed|hot|rolling] "
                "[--iterations N] [--checksum sample|full|none] [--no-read]\n";
 }
@@ -102,6 +105,7 @@ static Args parse_args(int argc, char **argv) {
     if (key == "--index") args.index = need_value("--index");
     else if (key == "--root") args.root = need_value("--root");
     else if (key == "--trace") args.trace = need_value("--trace");
+    else if (key == "--fixture") args.fixture = need_value("--fixture");
     else if (key == "--layer") args.layer = std::stoi(need_value("--layer"));
     else if (key == "--layers") args.explicit_layers = parse_layers(need_value("--layers"));
     else if (key == "--experts") args.experts = parse_csv_ints(need_value("--experts"));
@@ -133,6 +137,9 @@ static Args parse_args(int argc, char **argv) {
   }
   if (args.simulate_tokens > 0 && args.slot_bank < 1) {
     throw std::runtime_error("--simulate-tokens requires --slot-bank >= 1");
+  }
+  if (!args.fixture.empty()) {
+    return args;
   }
   if (!args.trace.empty() && args.slot_bank < 1) {
     throw std::runtime_error("--trace requires --slot-bank >= 1");
@@ -409,6 +416,260 @@ static std::vector<TraceEvent> load_trace_events(const fs::path &trace_path) {
   return events;
 }
 
+struct ParityFixture {
+  int layer = 0;
+  int topk = 0;
+  std::vector<int> experts;
+  std::vector<float> route_weights;
+  std::vector<float> hidden;
+  std::vector<float> expected;
+};
+
+static std::string read_text_file(const fs::path &path) {
+  FILE *f = std::fopen(path.c_str(), "rb");
+  if (!f) throw std::runtime_error("failed to open file: " + path.string() + ": " + std::strerror(errno));
+  std::string out;
+  char buf[1 << 16];
+  while (true) {
+    size_t n = std::fread(buf, 1, sizeof(buf), f);
+    if (n) out.append(buf, n);
+    if (n < sizeof(buf)) {
+      if (std::ferror(f)) {
+        std::fclose(f);
+        throw std::runtime_error("failed reading file: " + path.string());
+      }
+      break;
+    }
+  }
+  std::fclose(f);
+  return out;
+}
+
+static size_t find_json_key(const std::string &text, const std::string &key) {
+  auto pos = text.find("\"" + key + "\"");
+  if (pos == std::string::npos) throw std::runtime_error("fixture missing key: " + key);
+  return pos;
+}
+
+static int parse_json_int(const std::string &text, const std::string &key) {
+  auto pos = find_json_key(text, key);
+  pos = text.find(':', pos);
+  if (pos == std::string::npos) throw std::runtime_error("bad scalar key: " + key);
+  char *end = nullptr;
+  long v = std::strtol(text.c_str() + pos + 1, &end, 10);
+  if (end == text.c_str() + pos + 1) throw std::runtime_error("bad int for key: " + key);
+  return static_cast<int>(v);
+}
+
+static std::string json_array_body(const std::string &text, const std::string &key) {
+  auto pos = find_json_key(text, key);
+  auto start = text.find('[', pos);
+  if (start == std::string::npos) throw std::runtime_error("bad array key: " + key);
+  int depth = 0;
+  for (size_t i = start; i < text.size(); ++i) {
+    if (text[i] == '[') ++depth;
+    else if (text[i] == ']') {
+      --depth;
+      if (depth == 0) return text.substr(start + 1, i - start - 1);
+    }
+  }
+  throw std::runtime_error("unterminated array for key: " + key);
+}
+
+static std::vector<float> parse_json_float_array(const std::string &text, const std::string &key) {
+  std::string body = json_array_body(text, key);
+  std::vector<float> out;
+  const char *p = body.c_str();
+  while (*p) {
+    while (*p && (*p == ',' || std::isspace(static_cast<unsigned char>(*p)))) ++p;
+    if (!*p) break;
+    char *end = nullptr;
+    double v = std::strtod(p, &end);
+    if (end == p) throw std::runtime_error("bad float in array: " + key);
+    out.push_back(static_cast<float>(v));
+    p = end;
+  }
+  return out;
+}
+
+static std::vector<int> parse_json_int_array(const std::string &text, const std::string &key) {
+  std::string body = json_array_body(text, key);
+  std::vector<int> out;
+  const char *p = body.c_str();
+  while (*p) {
+    while (*p && (*p == ',' || std::isspace(static_cast<unsigned char>(*p)))) ++p;
+    if (!*p) break;
+    char *end = nullptr;
+    long v = std::strtol(p, &end, 10);
+    if (end == p) throw std::runtime_error("bad int in array: " + key);
+    out.push_back(static_cast<int>(v));
+    p = end;
+  }
+  return out;
+}
+
+static ParityFixture load_parity_fixture(const fs::path &path) {
+  std::string text = read_text_file(path);
+  ParityFixture fx;
+  fx.layer = parse_json_int(text, "layer");
+  fx.topk = parse_json_int(text, "topk");
+  fx.experts = parse_json_int_array(text, "experts");
+  fx.route_weights = parse_json_float_array(text, "route_weights");
+  fx.hidden = parse_json_float_array(text, "hidden");
+  fx.expected = parse_json_float_array(text, "expected_routed");
+  if (fx.experts.size() != fx.route_weights.size()) throw std::runtime_error("fixture experts/route_weights length mismatch");
+  if (fx.experts.size() != static_cast<size_t>(fx.topk)) throw std::runtime_error("fixture topk does not match experts length");
+  if (fx.hidden.size() != 4096) throw std::runtime_error("fixture hidden must have 4096 floats");
+  if (fx.expected.size() != 4096) throw std::runtime_error("fixture expected_routed must have 4096 floats");
+  return fx;
+}
+
+struct TensorSlice {
+  uint64_t offset = 0;
+  uint64_t nbytes = 0;
+  const uint8_t *ptr = nullptr;
+};
+
+struct ExpertBank {
+  int layer = 0;
+  int expert = 0;
+  std::vector<uint8_t> raw;
+  TensorSlice up_w, up_s, up_b;
+  TensorSlice gate_w, gate_s, gate_b;
+  TensorSlice down_w, down_s, down_b;
+};
+
+static const Entry *find_entry(const std::vector<Entry> &entries, int layer, int expert, const std::string &family, const std::string &kind) {
+  for (const auto &entry : entries) {
+    if (entry.layer == layer && entry.expert == expert && entry.family == family && entry.kind == kind) return &entry;
+  }
+  return nullptr;
+}
+
+static void set_slice(TensorSlice &slice, const Entry *entry, const Span &span, const std::vector<uint8_t> &raw) {
+  if (!entry) throw std::runtime_error("missing tensor entry while materializing expert");
+  if (entry->offset < span.offset || entry->offset + entry->nbytes > span.offset + span.nbytes) {
+    throw std::runtime_error("tensor entry outside expert span");
+  }
+  slice.offset = entry->offset - span.offset;
+  slice.nbytes = entry->nbytes;
+  slice.ptr = raw.data() + slice.offset;
+}
+
+static ExpertBank load_expert_bank(const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, FdCache &fds, int layer, int expert) {
+  auto span_it = spans.find(span_key(layer, expert));
+  if (span_it == spans.end()) throw std::runtime_error("missing expert span for parity fixture");
+  const Span &span = span_it->second;
+  ExpertBank bank;
+  bank.layer = layer;
+  bank.expert = expert;
+  bank.raw.resize(static_cast<size_t>(span.nbytes));
+  int fd = fds.get(span.file);
+  read_exact(fd, span.offset, bank.raw);
+  set_slice(bank.up_w, find_entry(entries, layer, expert, "up_proj", "weight"), span, bank.raw);
+  set_slice(bank.up_s, find_entry(entries, layer, expert, "up_proj", "scales"), span, bank.raw);
+  set_slice(bank.up_b, find_entry(entries, layer, expert, "up_proj", "biases"), span, bank.raw);
+  set_slice(bank.gate_w, find_entry(entries, layer, expert, "gate_proj", "weight"), span, bank.raw);
+  set_slice(bank.gate_s, find_entry(entries, layer, expert, "gate_proj", "scales"), span, bank.raw);
+  set_slice(bank.gate_b, find_entry(entries, layer, expert, "gate_proj", "biases"), span, bank.raw);
+  set_slice(bank.down_w, find_entry(entries, layer, expert, "down_proj", "weight"), span, bank.raw);
+  set_slice(bank.down_s, find_entry(entries, layer, expert, "down_proj", "scales"), span, bank.raw);
+  set_slice(bank.down_b, find_entry(entries, layer, expert, "down_proj", "biases"), span, bank.raw);
+  return bank;
+}
+
+static uint32_t load_u32_le(const uint8_t *p) {
+  uint32_t v;
+  std::memcpy(&v, p, sizeof(v));
+  return v;
+}
+
+static uint16_t load_u16_le(const uint8_t *p) {
+  uint16_t v;
+  std::memcpy(&v, p, sizeof(v));
+  return v;
+}
+
+static float bf16_to_float(uint16_t bf) {
+  uint32_t bits = static_cast<uint32_t>(bf) << 16;
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+static float dequant_q4_affine(const TensorSlice &w, const TensorSlice &s, const TensorSlice &b, int out, int in, int packed_words, int groups) {
+  int word_index = out * packed_words + (in >> 3);
+  int nibble = in & 7;
+  uint32_t word = load_u32_le(w.ptr + static_cast<size_t>(word_index) * 4);
+  uint32_t q = (word >> (nibble * 4)) & 0xFu;
+  int group = in >> 6;
+  if (group >= groups) throw std::runtime_error("quant group out of bounds");
+  size_t sb_index = static_cast<size_t>(out * groups + group) * 2;
+  float scale = bf16_to_float(load_u16_le(s.ptr + sb_index));
+  float bias = bf16_to_float(load_u16_le(b.ptr + sb_index));
+  return static_cast<float>(q) * scale + bias;
+}
+
+static void qlinear(const std::vector<float> &x, const TensorSlice &w, const TensorSlice &s, const TensorSlice &b, int out_dim, int in_dim, int packed_words, int groups, std::vector<float> &out) {
+  out.assign(out_dim, 0.0f);
+  for (int o = 0; o < out_dim; ++o) {
+    float acc = 0.0f;
+    for (int i = 0; i < in_dim; ++i) acc += x[static_cast<size_t>(i)] * dequant_q4_affine(w, s, b, o, i, packed_words, groups);
+    out[static_cast<size_t>(o)] = acc;
+  }
+}
+
+static float silu(float x) {
+  return x / (1.0f + std::exp(-x));
+}
+
+static std::vector<float> compute_routed_fixture(const ParityFixture &fx, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const Args &args, uint64_t &bytes_read, int &read_calls) {
+  FdCache fds(args.root);
+  std::vector<float> routed(4096, 0.0f), up, gate, hidden, down;
+  bytes_read = 0;
+  read_calls = 0;
+  for (size_t eidx = 0; eidx < fx.experts.size(); ++eidx) {
+    ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, fx.experts[eidx]);
+    bytes_read += bank.raw.size();
+    ++read_calls;
+    qlinear(fx.hidden, bank.up_w, bank.up_s, bank.up_b, 1536, 4096, 512, 64, up);
+    qlinear(fx.hidden, bank.gate_w, bank.gate_s, bank.gate_b, 1536, 4096, 512, 64, gate);
+    hidden.resize(1536);
+    for (int i = 0; i < 1536; ++i) hidden[static_cast<size_t>(i)] = silu(gate[static_cast<size_t>(i)]) * up[static_cast<size_t>(i)];
+    qlinear(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down);
+    float weight = fx.route_weights[eidx];
+    for (int i = 0; i < 4096; ++i) routed[static_cast<size_t>(i)] += weight * down[static_cast<size_t>(i)];
+  }
+  return routed;
+}
+
+struct ErrorStats {
+  double max_abs = 0.0;
+  double mean_abs = 0.0;
+  double rmse = 0.0;
+  int max_index = 0;
+};
+
+static ErrorStats compare_vectors(const std::vector<float> &actual, const std::vector<float> &expected) {
+  if (actual.size() != expected.size()) throw std::runtime_error("compare_vectors size mismatch");
+  ErrorStats stats;
+  double sum_abs = 0.0;
+  double sum_sq = 0.0;
+  for (size_t i = 0; i < actual.size(); ++i) {
+    double diff = static_cast<double>(actual[i]) - static_cast<double>(expected[i]);
+    double ad = std::fabs(diff);
+    if (ad > stats.max_abs) {
+      stats.max_abs = ad;
+      stats.max_index = static_cast<int>(i);
+    }
+    sum_abs += ad;
+    sum_sq += diff * diff;
+  }
+  stats.mean_abs = sum_abs / static_cast<double>(actual.size());
+  stats.rmse = std::sqrt(sum_sq / static_cast<double>(actual.size()));
+  return stats;
+}
+
 static std::string json_escape(const std::string &s) {
   std::string out;
   for (char c : s) {
@@ -448,6 +709,38 @@ int main(int argc, char **argv) {
     for (const auto &s : plan) planned_bytes += s.nbytes;
 
     auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
+
+    if (!args.fixture.empty()) {
+      ParityFixture fx = load_parity_fixture(args.fixture);
+      auto t0 = std::chrono::steady_clock::now();
+      uint64_t bytes_read = 0;
+      int read_calls = 0;
+      std::vector<float> actual = compute_routed_fixture(fx, entries, spans, args, bytes_read, read_calls);
+      auto t1 = std::chrono::steady_clock::now();
+      ErrorStats err = compare_vectors(actual, fx.expected);
+      auto elapsed = std::chrono::duration<double>(t1 - t0).count();
+      std::cout << "{\n";
+      std::cout << "  \"ok\": true,\n";
+      std::cout << "  \"mode\": \"parity-fixture\",\n";
+      std::cout << "  \"fixture\": \"" << json_escape(args.fixture.string()) << "\",\n";
+      std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
+      std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
+      std::cout << "  \"layer\": " << fx.layer << ",\n";
+      std::cout << "  \"topk\": " << fx.topk << ",\n";
+      std::cout << "  \"read_calls\": " << read_calls << ",\n";
+      std::cout << "  \"bytes_read\": " << bytes_read << ",\n";
+      std::cout << "  \"gib_read\": " << static_cast<double>(bytes_read) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
+      std::cout << "  \"compute_elapsed_s\": " << elapsed << ",\n";
+      std::cout << "  \"max_abs_error\": " << err.max_abs << ",\n";
+      std::cout << "  \"mean_abs_error\": " << err.mean_abs << ",\n";
+      std::cout << "  \"rmse\": " << err.rmse << ",\n";
+      std::cout << "  \"parity_threshold\": 0.0001,\n";
+      std::cout << "  \"parity_pass\": " << (err.max_abs <= 1.0e-4 ? "true" : "false") << ",\n";
+      std::cout << "  \"max_error_index\": " << err.max_index << "\n";
+      std::cout << "}\n";
+      return 0;
+    }
 
     if (!args.trace.empty()) {
       auto events = load_trace_events(args.trace);
