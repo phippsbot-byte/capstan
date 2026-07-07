@@ -418,24 +418,40 @@ def capture_parity_fixture(layer: int, x: mx.array, indices: mx.array, route_wei
     batch = int(os.environ.get("HY3_PARITY_BATCH", "0"))
     mx.eval(x, indices, route_weights, routed_output)
     idx_np = np.array(indices, copy=False)
-    if idx_np.ndim != 3 or batch >= idx_np.shape[0] or token >= idx_np.shape[1]:
-        raise ValueError(f"cannot capture parity token batch={batch} token={token} from indices shape {idx_np.shape}")
-    hidden_np = np.array(x[batch, token].astype(mx.float32))
-    weights_np = np.array(route_weights[batch, token].astype(mx.float32))
-    output_np = np.array(routed_output[batch, token].astype(mx.float32))
+    if idx_np.ndim != 3 or batch >= idx_np.shape[0]:
+        raise ValueError(f"cannot capture parity batch={batch} from indices shape {idx_np.shape}")
+    if env_truthy("HY3_PARITY_ALL_TOKENS"):
+        token_indices = list(range(idx_np.shape[1]))
+    else:
+        if token >= idx_np.shape[1]:
+            raise ValueError(f"cannot capture parity token batch={batch} token={token} from indices shape {idx_np.shape}")
+        token_indices = [token]
+    hidden_np = np.array(x[batch, token_indices].astype(mx.float32))
+    weights_np = np.array(route_weights[batch, token_indices].astype(mx.float32))
+    output_np = np.array(routed_output[batch, token_indices].astype(mx.float32))
+    experts_by_token = [[int(v) for v in idx_np[batch, tok].tolist()] for tok in token_indices]
+    weights_by_token = [[float(v) for v in row.tolist()] for row in weights_np]
     _PARITY_FIXTURES.append(
         {
-            "schema": "hy3-routed-layer-parity-v1",
+            "schema": "hy3-routed-layer-parity-v2",
             "layer": layer,
             "batch": batch,
-            "token": token,
+            "token": int(token_indices[0]),
+            "tokens": [int(tok) for tok in token_indices],
+            "seq_len": len(token_indices),
             "hidden_size": int(hidden_np.shape[-1]),
             "output_size": int(output_np.shape[-1]),
             "topk": int(idx_np.shape[-1]),
-            "experts": [int(v) for v in idx_np[batch, token].tolist()],
-            "route_weights": [float(v) for v in weights_np.tolist()],
-            "hidden": [float(v) for v in hidden_np.tolist()],
-            "expected_routed": [float(v) for v in output_np.tolist()],
+            "experts": experts_by_token[0],
+            "route_weights": weights_by_token[0],
+            "hidden": [float(v) for v in hidden_np[0].tolist()],
+            "expected_routed": [float(v) for v in output_np[0].tolist()],
+            "experts_by_token": experts_by_token,
+            "route_weights_by_token": weights_by_token,
+            "experts_flat": [int(v) for row in experts_by_token for v in row],
+            "route_weights_flat": [float(v) for row in weights_by_token for v in row],
+            "hidden_tokens": [float(v) for v in hidden_np.reshape(-1).tolist()],
+            "expected_routed_tokens": [float(v) for v in output_np.reshape(-1).tolist()],
         }
     )
     _PARITY_CAPTURED_LAYERS.add(layer)
@@ -472,7 +488,8 @@ def write_parity_fixtures(out_dir: str | os.PathLike[str], metadata: Optional[di
         payload = dict(fixture)
         if metadata:
             payload["metadata"] = metadata
-        path = root / f"hy3-layer{fixture['layer']}-top{fixture['topk']}-token{fixture['token']}.json"
+        suffix = f"seq{fixture.get('seq_len', 1)}" if int(fixture.get("seq_len", 1)) > 1 else f"token{fixture['token']}"
+        path = root / f"hy3-layer{fixture['layer']}-top{fixture['topk']}-{suffix}.json"
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         paths.append(str(path))
     (root / "fixtures.txt").write_text("\n".join(paths) + "\n", encoding="utf-8")

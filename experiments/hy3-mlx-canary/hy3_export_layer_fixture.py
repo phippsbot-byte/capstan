@@ -61,6 +61,7 @@ def build_metadata(args: argparse.Namespace, ids: list[int], meta: dict[str, Any
         "layout": str(args.layout),
         "slot_bank": args.slot_bank,
         "topk_cap": args.topk_cap,
+        "all_tokens": bool(args.all_tokens),
         "input_ids": ids,
         "load_s": round(load_s, 3),
         "forward_to_layer_s": round(forward_s, 3),
@@ -87,6 +88,8 @@ def main() -> None:
     parser.add_argument("--slot-bank", type=int, default=16)
     parser.add_argument("--topk-cap", type=int, default=5)
     parser.add_argument("--token-id", type=int, help="single token id; defaults to model BOS")
+    parser.add_argument("--token-ids", help="comma-separated token ids for synthetic prompt fixture")
+    parser.add_argument("--all-tokens", action="store_true", help="capture every token position in the input sequence")
     parser.add_argument("--prompt", help="optional raw prompt to tokenize instead of --token-id/BOS")
     parser.add_argument("--max-swap-gib", type=float, default=64.0)
     parser.add_argument("--max-swap-delta-gib", type=float, default=12.0)
@@ -97,6 +100,10 @@ def main() -> None:
     os.environ["HY3_TOPK_CAP"] = str(args.topk_cap)
     os.environ["HY3_PARITY_TOKEN"] = str(args.token)
     os.environ["HY3_PARITY_BATCH"] = "0"
+    if args.all_tokens:
+        os.environ["HY3_PARITY_ALL_TOKENS"] = "1"
+    else:
+        os.environ.pop("HY3_PARITY_ALL_TOKENS", None)
 
     guard = start_swap_guard(args.max_swap_gib, args.max_swap_delta_gib)
     t0 = time.time()
@@ -122,6 +129,10 @@ def main() -> None:
 
         tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR), trust_remote_code=True)
         ids = tokenizer.encode(args.prompt, add_special_tokens=False)
+    elif args.token_ids:
+        ids = [int(part) for part in args.token_ids.split(",") if part.strip()]
+        if not ids:
+            raise ValueError("--token-ids produced an empty id list")
     else:
         token_id = int(args.token_id if args.token_id is not None else config.get("bos_token_id", 120000))
         ids = [token_id]
@@ -145,6 +156,7 @@ def main() -> None:
             "out_dir": str(out_dir),
             "fixture_list": fixture_list,
             "fixtures": len(paths),
+            "seq_len": sorted({int(f.get("seq_len", 1)) for f in fixtures}),
             "layers": [int(f["layer"]) for f in fixtures],
             "topk": sorted({int(f["topk"]) for f in fixtures}),
             "load_s": round(load_s, 3),
@@ -164,6 +176,7 @@ def main() -> None:
             "layer": fixture["layer"],
             "token": fixture["token"],
             "topk": fixture["topk"],
+            "seq_len": fixture.get("seq_len", 1),
             "experts": fixture["experts"],
             "load_s": round(load_s, 3),
             "forward_to_layer_s": round(forward_s, 3),

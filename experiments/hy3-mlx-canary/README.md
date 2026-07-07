@@ -1,44 +1,63 @@
-# Hy3 MLX lazy-sidecar canary
+# Hy3 MLX Canary
 
-Local R&D snapshot for Tencent Hy3 / `hy_v3` expert streaming on the 96GB Mac Studio.
+Local Hy3 / `hy_v3` MLX lazy-expert runtime experiments for the Mac Studio.
 
-This is **not production Capstan code**. It preserves the working Python/MLX canary so the C++/Capstan port has a verified reference implementation and benchmark artifacts.
+This repo is **code + metadata only**. It intentionally does not contain model weights, packed sidecars, logs, or credentials.
 
-## What is tracked here
+## Current verdict
 
-- `hy_v3_mlx_lazy.py` — lazy routed-expert Hy3 model implementation.
-- `hy3_lazy_smoke.py` — guarded resident/load/forward/generate smoke runner.
-- `hy3_pack_sidecar.py` — packs original MLX safetensor expert tensors into layer-major expert-major sidecar files.
-- `hy3_routed_microbench.py` — isolates routed expert `gather_qmm`, weighting/sum, and sidecar behavior.
-- `hy3_openai_server.py` — tiny single-threaded OpenAI-compatible canary server for local eval smokes.
-- `hy3_sidecar_layout.py` + `hy3-sidecar-layout.json` — metadata/offset snapshot for the local downloaded preview model.
-- `HY3-LAZY-SIDECAR-STATUS.md` — chronological verdicts, measurements, and next steps.
+- Flat/stock MLX load is not viable on the 96GB Studio; it hit swap before useful generation.
+- Lazy SSD sidecar runtime works: resident core stays small and routed experts stream from SSD.
+- Packed layer-major sidecar works and removed the worst Python-GC bottleneck.
+- Local top-4/top-5/top-6 Python lanes are plumbing canaries, not quality lanes; top5/slot16 + prefix prewarm + expert-cache clear is the stable operator lane.
+- First Capstan/C++ substrate exists under `cpp/`: split reusable expert-bank/q4/routed-MLP modules + compact index + contiguous expert-span `pread` benchmark + native slot-bank cache simulation + real router trace replay + routed q4 parity. Full top-8 all-layer expert payload (6.249GiB / 632 spans) reads in ~3.2s warm-cache on the Studio; a real top5/slot16 prefill+decode trace replays 20.853GiB with 1,051 hits / 2,109 misses / 845 evictions; all 79 MoE layers pass native routed parity, and a 4-token all-layer prefill fixture passes with 1,580 expert spans / 15.6226GiB read.
 
-## What is intentionally not tracked
+## Important files
 
-Heavy model artifacts live outside Git:
+| File | Purpose |
+|---|---|
+| `hy_v3_mlx_lazy.py` | Lazy Hy3 model/runtime with SSD-backed expert cache |
+| `hy3_lazy_smoke.py` | Guarded substrate smokes: expert read, resident load, one-token, generate |
+| `hy3_openai_server.py` | OpenAI-compatible canary server with request clamps/busy state |
+| `hy3_local_optimizer.py` | Lane sweep runner for top-k/slot-bank smoke tests |
+| `hy3_pack_sidecar.py` | Builds packed layer-major sidecar from MLX safetensors |
+| `hy3_sidecar_layout.py` | Metadata-only sidecar layout planner |
+| `run_hy3_phipps_slice.sh` | Tiny Phipps slice runner with DS4 restore trap |
+| `hy3_emit_compact_index.py` | Emits compact TSV sidecar index for native/C++ experiments |
+| `hy3_export_layer_fixture.py` | Exports compact Python/MLX routed-layer parity fixtures for native replay |
+| `cpp/` | Split C++20 sidecar substrate, real trace replay, all-layer parity, and prefill fixture replay |
+| `HY3-LAZY-SIDECAR-STATUS.md` | Running status and measured artifacts |
 
-- `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX`
-- `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar`
-- `/Volumes/ModelSSD/logs/hy3-mlx-canary`
+## Local artifact expectations
 
-Do not commit model weights, packed sidecar binaries, or generated logs.
+Default paths used by the canary:
 
-## Current verified result
+- MLX model: `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX`
+- Packed sidecar manifest: `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json`
+- Logs/results: `/Volumes/ModelSSD/logs/hy3-mlx-canary`
 
-After removing explicit per-expert `gc.collect()` from the hot path:
+## Quick checks
 
-- packed one-token forward: ~3.5s, 0.0GiB swap delta
-- packed KV-cache `pong`: clean exact `pong`
-- slot-bank 16 full top-8 `pong`: ~14.8s / 1.1s / 1.1s with frequency-retention cache policy, 0.0GiB swap delta
-- slot-bank 18+ full top-8 currently swap-bombs under guarded runs
-- fast approximate lane: top-4 + slot-bank 32 exact `pong` at ~4.3s / 0.4s / 0.4s, 0.0GiB swap delta
-- top-4 + slot-bank 32 also passed exact JSON and tool-shaped JSON canaries
-- tiny OpenAI-compatible canary server exists at `hy3_openai_server.py`; smoke-passed `/v1/models`, exact `pong`, exact JSON, and OpenAI-style parsed tool call
-- top5/slot16 + prefix prewarm + expert-cache clear is the stable Python operator lane; top6 was slower and worse on the tiny Phipps slice
-- first C++20 substrate lives under `cpp/`: compact TSV sidecar index + contiguous expert-span `pread`; full top-8 all-layer expert payload reads 6.249GiB / 632 spans in ~3.2s warm-cache on the Studio
-- native slot-bank/cache scheduler now models layer-major read pressure before kernel work; top8 fixed 4-token trace at slot16 reads once then hits cache, top5 hot 8-token trace reads 7.811GiB with no evictions, adversarial top5 rolling churn reads 31.245GiB and evicts 1,896 spans
-- real router trace capture/replay now works end-to-end; top5/slot16 prefill+decode trace replays 20.853GiB with 1,051 hits / 2,109 misses / 845 evictions through native C++
-- routed parity now passes across all MoE layers: native q4 affine `up/gate/down + swiglu + route weighting` matches Python/MLX for 79/79 routed layers under a 2% relative/1e-4 absolute gate; worst relative error `0.0177684`
+Compile/static sanity:
 
-Next useful work: scale the native parity path from all-layer fixture replay into layer-major prefill/decode execution. Python canary work should be frozen unless a very specific smoke needs it.
+```bash
+/opt/homebrew/bin/python3.11 -m py_compile *.py
+```
+
+Metadata-only optimizer dry run:
+
+```bash
+/opt/homebrew/bin/python3.11 hy3_local_optimizer.py --dry-run
+```
+
+Small sidecar smoke:
+
+```bash
+/opt/homebrew/bin/python3.11 hy3_lazy_smoke.py expert-read \
+  --slot-bank 8 --layer 1 --experts 1 \
+  --layout /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json
+```
+
+## Operational guardrail
+
+When running Hy3 server/slices on the Studio, stop the DS4 SSD lane first and restore it afterward. `run_hy3_phipps_slice.sh` and `hy3_local_optimizer.py --stop-ds4` do that; the optimizer also has a swap guard (`--max-swap-gib`, `--max-swap-delta-gib`). The server has tool-scaffold prefix/KV caching (`--prefix-cache-min-tokens`) so repeated tool calls do not re-prefill the same giant schema block; use `hy3_local_optimizer.py --prewarm-prefixes` to pay that prefix build before measured prompts. If cumulative request pressure is the problem, test `--clear-expert-cache-after-request` before touching slot sizes again. Ad-hoc shells usually forget this stuff and then we get mystery pressure. Computers: still dumb, still fast at hurting themselves.

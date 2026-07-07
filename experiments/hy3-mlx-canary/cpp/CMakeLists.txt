@@ -5,5 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(hy3_sidecar_io hy3_sidecar_io.cpp)
+add_executable(hy3_sidecar_io
+  hy3_sidecar_io.cpp
+  hy3_expert_bank.cpp
+  hy3_q4_affine.cpp
+  hy3_routed_mlp.cpp
+)
 target_compile_options(hy3_sidecar_io PRIVATE -Wall -Wextra -Wpedantic -O3)

@@ -2,7 +2,13 @@
 
 First Capstan/C++ cut for the Hy3 packed sidecar. This is deliberately not a
 model server yet. It proves the C++ runtime can consume the packed layer-major
-sidecar index and issue one contiguous `pread` per selected expert.
+sidecar index, issue one contiguous `pread` per selected expert, and replay routed
+MLP parity fixtures through reusable native modules:
+
+- `hy3_expert_bank.*` — compact-index loading, expert-span materialization, fd reuse.
+- `hy3_q4_affine.*` — MLX q4 affine dequantization and dense qlinear.
+- `hy3_routed_mlp.*` — routed `up/gate/down + swiglu + route weighting` parity replay.
+- `hy3_sidecar_io.cpp` — thin CLI for IO/cache simulation and fixture validation.
 
 Why this exists: the Python canary proved the algorithm, but Python/MLX cache
 lifetime and request glue are not the product path. Capstan needs a small native
@@ -102,7 +108,7 @@ HY3_SIDECAR_LAYOUT=/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifes
 First real trace artifact:
 `/Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/20260707-102115/`.
 
-## One-layer routed parity fixture
+## Routed parity fixtures
 
 Python can now export a compact routed-MoE parity fixture from a real hidden
 state/router decision:
@@ -148,3 +154,24 @@ expert spans, and completed in **34.87s**. Absolute error grows with late-layer
 activation magnitude, so all-layer pass uses `max_abs <= max(1e-4, 2% of expected
 max abs)`: worst absolute error `16.9663` on layer 79, worst relative-to-expected
 error `0.0177684` on layer 75, `parity_pass=true`.
+
+Multi-token prefill fixtures use `--all-tokens` plus a short token-id sequence.
+This captures `[seq_len, hidden]`, `[seq_len, topk]`, route weights, and expected
+routed outputs for each MoE layer:
+
+```bash
+/opt/homebrew/bin/python3.11 hy3_export_layer_fixture.py \
+  --layers 1-79 --all-tokens --token-ids 120000,79,792,120025 \
+  --slot-bank 16 --topk-cap 5 \
+  --out-dir /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>
+
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --fixture-list /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>/fixtures.txt
+```
+
+Prefill4 artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/`.
+The split C++ substrate replayed **79** fixtures with `seq_len=4`, read
+**15.6226GiB** across **1,580** expert spans, completed in **32.44s**, and passed
+with worst relative-to-expected error `0.0141305`.

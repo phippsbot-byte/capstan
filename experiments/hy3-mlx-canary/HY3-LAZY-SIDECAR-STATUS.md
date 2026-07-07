@@ -118,12 +118,12 @@ Interpretation: the runtime path is functionally correct enough to emit the expe
 ## Current known limitations
 
 1. Python prototype, not server-grade.
-2. Uses safetensors raw byte reads per selected expert; no packed contiguous sidecar yet.
-3. Per-layer prompt prefill is still ubatch/token-major and reload-heavy.
-4. Slot-bank is a Python LRU of MLX arrays; no secondary sidecar / split physical IO.
-5. No OpenAI-compatible server wrapper yet.
-6. MTP is not implemented.
-7. Tool parser/template integration is not implemented.
+2. Per-layer prompt prefill is still ubatch/token-major and reload-heavy.
+3. Slot-bank is a Python LRU of MLX arrays; no secondary sidecar / split physical IO.
+4. MTP is not implemented.
+5. Current top-4 approximation is quality-damaged on Phipps prompts; use it as plumbing only.
+6. Server-side cancellation is still cooperative: request clamps/timeouts stop decode and report failures, but a long MLX prefill can only be observed/rejected after it returns.
+7. The local artifact is Hy3-preview 4bit, not the current cloud-scored Hy3 release.
 
 ## Packed layer-major sidecar result
 
@@ -268,33 +268,173 @@ Added optional `HY3_TOPK_CAP` / `--topk-cap` for approximate local serving. This
 
 Added tiny OpenAI-compatible canary server: `/Users/nb/LLM/hy3-mlx-canary/hy3_openai_server.py`. It serves `/v1/models`, `/health`, and `/v1/chat/completions`, renders the real Hy3 chat template with `reasoning_effort=no_think`, and parses Hy3 `<tool_calls>` into OpenAI-style `tool_calls`. Smoke on port `8133` passed exact `pong`, exact JSON, and a calculator tool-call request. The tool-template path is still expensive because the template expands to ~196 prompt tokens; that is a serving/runtime cost issue, not a model-format blocker.
 
+Server hardening follow-up:
+- `hy3_openai_server.py` now uses a threaded HTTP server plus a single-generation lock so health/model probes can respond while a generation is active and concurrent generations get a clear `409 busy` instead of corrupting the runtime.
+- request clamps added: `--hard-max-tokens`, `--max-prompt-tokens`, and `--request-timeout-sec`.
+- timeout is cooperative: decode can stop cleanly, but a long MLX prefill can only be rejected after it returns.
+- added optimizer sweep runner: `/Users/nb/LLM/hy3-mlx-canary/hy3_local_optimizer.py` for top-k/slot-bank smoke matrices with optional DS4 stop/restore.
+- code/metadata were prepared for GitHub as `phippsbot-byte/hy3-mlx-canary`; weights, packed sidecars, logs, and credentials stay out of git.
+
+## Optimizer sweep result — 2026-07-07
+
+Run artifact committed under `optimizer-runs/20260707-063805/`.
+
+| Lane | Pong | JSON | Tool | PE-short | Swap verdict |
+|---|---:|---:|---:|---:|---|
+| top-4 / slot32 | 13.88s | 8.60s | 144.90s | 87.69s | passed guard but max swap **17.739GiB** / 18GiB delta |
+| top-5 / slot24 | 15.41s | 11.51s | 141.97s | failed disconnect | tripped guard: **21.110GiB** used |
+| top-6 / slot24 | 17.11s | 20.86s | 147.61s | failed disconnect | tripped guard: **20.094GiB** used |
+| top-8 / slot16 | 21.70s | 28.71s | failed disconnect | skipped after guard | tripped guard: **20.232GiB** used |
+
+Interpretation:
+- top-4/slot32 is the only lane that completed all four probes under the configured guard, but tool/PE prompts are still painfully slow and it runs right up to the swap cliff.
+- top-5/top-6 at slot24 are not safe on the current cache policy; bigger top-k with large slot-bank explodes pressure before the PE probe.
+- top-8/slot16 remains too expensive for tool-template prompts under this runner; it is a fairness reference only, not a usable serving lane yet.
+- DS4 restore passed after the run with exact JSON smoke.
+
 ## Next engineering step
 
 Do **not** rerun flat MLX.
 
-Current decision:
+Next useful work:
 
-1. Freeze Python serving at **top5/slot16 + prefix prewarm + expert-cache clear** for canary/operator checks only.
-2. Do not keep brute-tuning Python `topk` / slot-bank combos; top6 was slower and worse than top5 on the tiny Phipps slice.
-3. Move the serious path into Capstan/C++ layer-major prefill/decode.
+1. Implement real prefix/KV cache reuse in `hy3_openai_server.py` for repeated system/harness/tool-template scaffolding. Tool-template prefill is the current obvious tax.
+2. Add prompt-length/token accounting to optimizer output and split tool-template vs no-tool prompts so we stop mixing model speed with template bloat.
+3. Run a safer second sweep: `top4/24`, `top4/28`, `top5/16`, `top5/20`, `top6/16` with a tighter max-token cap and lower swap delta.
+4. Only if top5/top6 at smaller slots survive, run a 2-4 test Phipps slice. Otherwise, keep Hy3 local as R&D and put serious work into C++/Capstan-style layer-major prefill.
+
+## Prefix-cache experiment — 2026-07-07
+
+Added tool-scaffold prefix/KV cache reuse in `hy3_openai_server.py` and prompt-token/prefix-cache telemetry in `hy3_local_optimizer.py`.
+
+Validation run: `optimizer-runs/20260707-071352/`, lane `top4/slot32`, prompts `tool,tool-alt`.
+
+| Probe | Prompt tokens | Prefill tokens after split | Prefix | Wall |
+|---|---:|---:|---|---:|
+| tool `17*23` | 197 | 12 | build, 185-token prefix cached | 90.262s |
+| tool-alt `19*29` | 197 | 12 | cache hit | 30.005s |
+
+Both returned correct OpenAI-style calculator tool calls. Max swap during this run was **13.167GiB** and DS4 restore/smoke passed afterward. This proves the repeated-tool-schema tax is real and cacheable; first request still pays the 185-token prefix build, but repeated tool calls are ~3x faster on this top4/slot32 lane.
+
+Next useful work now:
+
+1. Pre-warm common tool/system scaffolds before eval runs so the first measured request does not eat prefix-build cost.
+2. Run the smaller-slot sweep with prefix cache active: `top4/24`, `top4/28`, `top5/16`, `top5/20`, `top6/16` over `pong,json,tool,tool-alt,pe-short`.
+3. If top5/top6 survives with flat swap, run a tiny Phipps slice. If not, stop optimizing Python UX and move hot prefill to Capstan/C++.
+
+## Expert-cache clear result — 2026-07-07
+
+Smaller-slot prefix sweep without clearing proved the cumulative sidecar expert cache was the memory-pressure villain: every tested lane tripped the 16GiB swap-delta guard even with prefix cache active.
+
+Added `Hy3SidecarStore.clear_cached_experts()`, server flag `--clear-expert-cache-after-request`, and optimizer flag of the same name. This keeps the reusable KV prefix cache but drops sidecar expert tensors after every warm/generation request.
+
+Validation run: `optimizer-runs/20260707-073907/`, lane `top4/slot24`, with prefix prewarm and expert-cache clear.
+
+| Probe | Wall | Prompt toks | Prefill toks | Prefix hit | Result |
+|---|---:|---:|---:|---|---|
+| pong | 13.245s | 21 | 21 | - | exact `pong` |
+| JSON | 10.092s | 25 | 25 | - | exact `{\"ok\":true}` |
+| tool `17*23` | 15.164s | 197 | 12 | yes | correct tool call |
+| tool-alt `19*29` | 12.718s | 197 | 12 | yes | correct tool call |
+| PE-short | 42.252s | 74 | 74 | - | completed, length-capped |
+
+Swap stayed flat: start **2.620GiB**, max **4.530GiB**, end **2.799GiB**. DS4 restore/smoke passed.
+
+Interpretation: for Python Hy3 serving on the 96GB Studio, persistent expert reuse is less valuable than avoiding cumulative memory pressure. Current best operator mode is **top4/slot24 + prefix prewarm + clear expert cache after request**. It is slower than real serving should be, but it is stable enough for more probing.
+
+Next useful work now:
+
+1. Run `top5/16` and `top6/16` with prefix prewarm + expert-cache clear.
+2. If either survives, compare quality on the tiny Phipps slice.
+3. If neither survives, use top4/slot24 clear mode as the stable canary and move performance work into Capstan/C++.
+
+## Top5/Top6 clear-mode sweep — 2026-07-07
+
+Validation run: `optimizer-runs/20260707-074244/`, with prefix prewarm + expert-cache clear.
+
+| Lane | Pong | JSON | Tool | Tool-alt | PE-short | Swap verdict |
+|---|---:|---:|---:|---:|---:|---|
+| top5 / slot16 | 14.878s | 12.058s | 18.593s | 14.969s | 54.505s | flat: **2.799 → 2.843GiB**, max **2.843GiB** |
+| top6 / slot16 | 18.994s | 15.618s | 23.256s | 17.802s | 73.176s | safe: **2.843 → 2.955GiB**, max **10.527GiB** |
+
+Both lanes returned exact `pong`, exact JSON, correct calculator tool calls, and completed the PE-short probe under the 48-token cap. DS4 restore/smoke passed afterward.
+
+New best candidates:
+- **top5/slot16 + prefix prewarm + clear expert cache**: best speed/quality tradeoff candidate.
+- **top6/slot16 + prefix prewarm + clear expert cache**: slower but closer to full Hy3 routing; still safe.
+
+Next useful work now:
+
+1. Run a tiny Phipps slice on top5/slot16 clear mode first.
+2. If top5 quality is meaningfully better than top4 and latency is tolerable, run the same tiny slice on top6.
+3. If neither improves quality enough, freeze Python lane as a stable canary and move the speed work to Capstan/C++.
+
+## Phipps tiny slice — top5/slot16 clear — 2026-07-07
+
+Run: `/Volumes/ModelSSD/logs/hy3-mlx-canary/phipps-slice-results/phipps-eval-v3-20260707-080711.json`
+Report: `/Volumes/ModelSSD/logs/hy3-mlx-canary/hy3-phipps-top5-slot16-clear-20260707-top5clear.md`
+
+Config: `top5/slot16`, prefix cache enabled, expert cache cleared after request, 48-token cap.
+
+| Metric | Result |
+|---|---:|
+| composite | **2.32** |
+| avg latency | **94,598 ms** |
+| avg output tok/s | **0.6** |
+
+| Test | Score | Gate |
+|---|---:|---|
+| PE math | 1.00 | fail |
+| Conv brevity | 2.22 | fail |
+| Tool restraint | 4.08 | pass |
+| Tool calculator | 1.12 | fail |
+| Voice pushback | 4.02 | pass |
+| Edge no hallucinate | 3.62 | pass |
+| Edge structured JSON | 1.00 | fail |
+| IFEval format | 2.00 | pass-ish |
+
+Compared with the earlier top4/slot32 approximate slice: composite improved only **2.18 → 2.32**, but latency improved about **194.6s → 94.6s** average because clear-mode stops cumulative pressure. Quality is still not acceptable for Phipps; this is a stable runtime canary, not a competitive lane.
+
+Next useful work now:
+
+1. Run the same tiny slice on top6/slot16 clear mode only if we want to check whether one more routed expert fixes quality.
+2. Otherwise freeze top5/slot16 clear as the Python operator lane and move performance/quality work into Capstan/C++.
+
+## Phipps tiny slice — top6/slot16 clear — 2026-07-07
+
+Run: `/Volumes/ModelSSD/logs/hy3-mlx-canary/phipps-slice-results/phipps-eval-v3-20260707-082649.json`
+Report: `/Volumes/ModelSSD/logs/hy3-mlx-canary/hy3-phipps-top6-slot16-clear-20260707-top6clear.md`
+
+Config: `top6/slot16`, prefix cache enabled, expert cache cleared after request, 48-token cap.
+
+| Metric | Top5 clear | Top6 clear | Verdict |
+|---|---:|---:|---|
+| composite | **2.32** | **2.23** | top5 wins |
+| avg latency | **94,598 ms** | **113,359 ms** | top5 wins |
+| avg output tok/s | **0.6** | **0.5** | top5 wins |
+
+Top6 improved only `tool_calculator` and `ifeval_format`, but regressed hallucination, brevity, voice, and overall composite. It is also slower. One more routed expert does **not** fix the local approximate quality problem.
+
+Decision: freeze **top5/slot16 + prefix prewarm + clear expert cache** as the stable Python canary/operator lane. Do not spend more time tuning Python slot/top-k unless we need a very specific smoke. The real path is Capstan/C++ layer-major prefill/decode with the same guardrails.
 
 ## Capstan/C++ sidecar IO substrate — 2026-07-07
 
-Added first native substrate:
+First native substrate landed under `cpp/` plus compact index emitter `hy3_emit_compact_index.py`. This is not a model server yet; it proves Capstan/C++ can consume the packed Hy3 sidecar with a tiny TSV index and issue one contiguous `pread` per `(layer, expert)` span.
 
-- `hy3_emit_compact_index.py` emits a compact TSV index from the huge packed JSON manifest.
-- `cpp/hy3_sidecar_io.cpp` builds with CMake/Apple clang and reads one contiguous span per `(layer, expert)` from the packed sidecar.
-- artifact: `cpp/results/20260707-sidecar-io.json`
+Files:
+- `hy3_emit_compact_index.py` → emits `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv` from the 50MiB JSON manifest.
+- `cpp/hy3_sidecar_io.cpp` → C++20 IO smoke/benchmark.
+- `cpp/results/20260707-sidecar-io.json` → benchmark artifact.
 
-Verified on the Studio:
+Verified on the Studio with Apple clang 21:
 
 | Probe | Planned spans | Read calls | Payload | Read wall | Throughput | Checksum |
 |---|---:|---:|---:|---:|---:|---|
-| plan full top8, no read | 632 | 0 | 6.249GiB planned | 0s | - | `0x14650fb0739d0383` |
-| layer1 top8 read | 8 | 8 | 0.079GiB | 0.028s | 2.78GiB/s | `0x71ee6d2d6ebd0576` |
-| all MoE layers top8 read | 632 | 632 | 6.249GiB | 3.118s | 2.00GiB/s | `0x1e173ad573437fa4` |
+| plan full top8, no read | 632 | 0 | 0 GiB actual / 6.249 GiB planned | 0s | - | `0x14650fb0739d0383` |
+| layer1 top8 read | 8 | 8 | 0.079 GiB | 0.028s | 2.78 GiB/s | `0x71ee6d2d6ebd0576` |
+| all MoE layers top8 read | 632 | 632 | 6.249 GiB | 3.118s | 2.00 GiB/s | `0x1e173ad573437fa4` |
 
-This is warm-filesystem IO, not a cold-drive worst case. Still, native sidecar IO is now clearly cheap enough to proceed.
+Notes: filesystem was warm from prior Hy3 work, so this is not a cold-drive worst-case number. Still, the substrate cost is now clearly below Python/MLX generation wall time.
 
 Native slot-bank/cache scheduling is now implemented in the same C++ substrate via `--simulate-tokens`, `--slot-bank`, `--policy`, and deterministic route patterns (`fixed`, `hot`, `rolling`). Updated artifact: `cpp/results/20260707-sidecar-io.json`.
 
@@ -325,13 +465,16 @@ Routed parity is now implemented:
 - Single-layer artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-112829/`.
 - All-layer artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-115831-all-layers/`.
 - C++ replay paths: `hy3_sidecar_io --fixture ...` and `hy3_sidecar_io --fixture-list .../fixtures.txt`.
+- C++ implementation is now split into reusable `hy3_expert_bank.*`, `hy3_q4_affine.*`, and `hy3_routed_mlp.*`; the CLI is no longer the math substrate.
+- Prefill4 artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/`.
 
-| Parity fixture | Fixtures/layers | Expert spans | Payload read | Compute wall | Max abs error | Max rel-to-expected | Verdict |
-|---|---:|---:|---:|---:|---:|---:|---|
-| layer1 top5 BOS routed MoE, before shared MLP | 1 | 5 | 0.049438GiB | 0.426s | `4.69808e-05` | ~0.0058 | pass `<1e-4` |
-| all MoE layers top5 BOS routed MoE, before shared MLP | 79 | 395 | 3.90564GiB | 34.87s | `16.9663` on layer 79 | `0.0177684` on layer 75 | pass `max(1e-4, 2% expected max)` |
+| Parity fixture | Fixtures/layers | Seq len | Expert spans | Payload read | Compute wall | Max abs error | Max rel-to-expected | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| layer1 top5 BOS routed MoE, before shared MLP | 1 | 1 | 5 | 0.049438GiB | 0.426s | `4.69808e-05` | ~0.0058 | pass `<1e-4` |
+| all MoE layers top5 BOS routed MoE, before shared MLP | 79 | 1 | 395 | 3.90564GiB | 34.87s | `16.9663` on layer 79 | `0.0177684` on layer 75 | pass `max(1e-4, 2% expected max)` |
+| all MoE layers top5 4-token prefill fixture | 79 | 4 | 1,580 | 15.6226GiB | 32.44s | `16.9663` on layer 79 | `0.0141305` on layer 74 | pass `max(1e-4, 2% expected max)` |
 
-Interpretation: native code can now materialize selected expert banks from the packed sidecar, dequantize MLX q4 affine weights, run `up/gate/down + swiglu + route weighting`, and match Python/MLX across every routed layer. Late-layer absolute errors are large because the expected activation magnitudes are huge; the relative gate is the right ABI/math check here. Next C++ step: scale this from fixture replay into layer-major prefill/decode execution and stop using Python/MLX request glue as the product path.
+Interpretation: native code can now materialize selected expert banks from the packed sidecar, dequantize MLX q4 affine weights, run `up/gate/down + swiglu + route weighting`, and match Python/MLX across every routed layer for both single-token and short prefill-shaped fixtures. Late-layer absolute errors are large because the expected activation magnitudes are huge; the relative gate is the right ABI/math check here. Next C++ work should turn fixture replay into layer-major execution with expert dedup across prompt tokens.
 
 ## DS4 lane cleanup
 
