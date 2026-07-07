@@ -168,10 +168,25 @@ routed outputs for each MoE layer:
 ./build/hy3-sidecar-io/hy3_sidecar_io \
   --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
   --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
-  --fixture-list /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>/fixtures.txt
+  --fixture-list /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>/fixtures.txt \
+  --layer-major
 ```
 
 Prefill4 artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/`.
 The split C++ substrate replayed **79** fixtures with `seq_len=4`, read
-**15.6226GiB** across **1,580** expert spans, completed in **32.44s**, and passed
-with worst relative-to-expected error `0.0141305`.
+**15.6226GiB** across **1,580** naïve expert spans, completed in **225.78s** after
+instrumentation, and passed with worst relative-to-expected error `0.0141305`.
+Layer-major replay of the same fixtures read each unique expert once per layer,
+reducing to **1,408** reads / **13.9219GiB** and saving **172** reads /
+**1.70068GiB**, with the same parity verdict. A duplicate-token regression
+(`/tmp/hy3-layer1-top5-bos-dup2.json`) confirms the gate catches true prompt reuse:
+`10` naïve reads collapse to `5` unique reads.
+
+A 16-token all-layer fixture export also succeeds:
+`/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-152258-prefill16-all-layers/`.
+Python/MLX exported **79** fixtures with `seq_len=16`, sidecar read **29.752075GiB**,
+forward-to-layer wall **97.636s**, and swap delta **0.0GiB**. Full C++ layer-major
+replay passed all 79 layers with **3,009** unique reads vs **6,320** naïve route
+reads, saving **3,311** reads / **32.7382GiB**; worst relative-to-expected error
+was `0.0157926`. Scalar qlinear wall was **891.59s**, so the next compute cut is
+SIMD/Metal, not more replay plumbing.

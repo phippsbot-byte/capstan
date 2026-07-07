@@ -11,6 +11,7 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 static std::string read_text_file(const fs::path &path) {
   FILE *f = std::fopen(path.c_str(), "rb");
@@ -140,28 +141,81 @@ std::vector<fs::path> load_fixture_list(const fs::path &list_path) {
   return paths;
 }
 
-std::vector<float> compute_routed_fixture(const ParityFixture &fx, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, uint64_t &bytes_read, int &read_calls) {
+static uint64_t span_nbytes_for_route(const std::unordered_map<uint64_t, Span> &spans, int layer, int expert) {
+  auto it = spans.find(span_key(layer, expert));
+  if (it == spans.end()) throw std::runtime_error("missing expert span for parity fixture");
+  return it->second.nbytes;
+}
+
+static void apply_expert_route(
+    const ExpertBank &bank,
+    const std::vector<float> &x,
+    float weight,
+    int token,
+    std::vector<float> &routed,
+    std::vector<float> &up,
+    std::vector<float> &gate,
+    std::vector<float> &hidden,
+    std::vector<float> &down) {
+  qlinear(x, bank.up_w, bank.up_s, bank.up_b, 1536, 4096, 512, 64, up);
+  qlinear(x, bank.gate_w, bank.gate_s, bank.gate_b, 1536, 4096, 512, 64, gate);
+  hidden.resize(1536);
+  for (int i = 0; i < 1536; ++i) hidden[static_cast<size_t>(i)] = silu(gate[static_cast<size_t>(i)]) * up[static_cast<size_t>(i)];
+  qlinear(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down);
+  for (int i = 0; i < 4096; ++i) routed[static_cast<size_t>(token) * 4096 + static_cast<size_t>(i)] += weight * down[static_cast<size_t>(i)];
+}
+
+RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, bool layer_major) {
   FdCache fds(root);
-  std::vector<float> routed(static_cast<size_t>(fx.seq_len * 4096), 0.0f), up, gate, hidden, down;
-  bytes_read = 0;
-  read_calls = 0;
+  RoutedComputeResult result;
+  result.actual.assign(static_cast<size_t>(fx.seq_len * 4096), 0.0f);
+  result.naive_read_calls = fx.seq_len * fx.topk;
+
+  std::vector<int> unique_experts;
+  std::unordered_set<int> seen_experts;
+  unique_experts.reserve(fx.experts_flat.size());
+  for (int expert : fx.experts_flat) {
+    if (seen_experts.insert(expert).second) unique_experts.push_back(expert);
+  }
+  result.unique_expert_spans = static_cast<int>(unique_experts.size());
+
   for (int token = 0; token < fx.seq_len; ++token) {
-    std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
     for (int k = 0; k < fx.topk; ++k) {
       size_t route = static_cast<size_t>(token * fx.topk + k);
-      ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, fx.experts_flat[route]);
-      bytes_read += bank.raw.size();
-      ++read_calls;
-      qlinear(x, bank.up_w, bank.up_s, bank.up_b, 1536, 4096, 512, 64, up);
-      qlinear(x, bank.gate_w, bank.gate_s, bank.gate_b, 1536, 4096, 512, 64, gate);
-      hidden.resize(1536);
-      for (int i = 0; i < 1536; ++i) hidden[static_cast<size_t>(i)] = silu(gate[static_cast<size_t>(i)]) * up[static_cast<size_t>(i)];
-      qlinear(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down);
-      float weight = fx.route_weights_flat[route];
-      for (int i = 0; i < 4096; ++i) routed[static_cast<size_t>(token) * 4096 + static_cast<size_t>(i)] += weight * down[static_cast<size_t>(i)];
+      result.naive_bytes_read += span_nbytes_for_route(spans, fx.layer, fx.experts_flat[route]);
     }
   }
-  return routed;
+
+  std::vector<float> up, gate, hidden, down;
+  if (!layer_major) {
+    for (int token = 0; token < fx.seq_len; ++token) {
+      std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
+      for (int k = 0; k < fx.topk; ++k) {
+        size_t route = static_cast<size_t>(token * fx.topk + k);
+        ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, fx.experts_flat[route]);
+        result.bytes_read += bank.raw.size();
+        ++result.read_calls;
+        apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down);
+      }
+    }
+  } else {
+    for (int expert : unique_experts) {
+      ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, expert);
+      result.bytes_read += bank.raw.size();
+      ++result.read_calls;
+      for (int token = 0; token < fx.seq_len; ++token) {
+        std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
+        for (int k = 0; k < fx.topk; ++k) {
+          size_t route = static_cast<size_t>(token * fx.topk + k);
+          if (fx.experts_flat[route] != expert) continue;
+          apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down);
+        }
+      }
+    }
+  }
+  result.dedup_saved_reads = result.naive_read_calls - result.read_calls;
+  result.dedup_saved_bytes = result.naive_bytes_read > result.bytes_read ? result.naive_bytes_read - result.bytes_read : 0;
+  return result;
 }
 
 ErrorStats compare_vectors(const std::vector<float> &actual, const std::vector<float> &expected) {
@@ -190,21 +244,25 @@ bool parity_passes(const ErrorStats &stats) {
   return stats.max_abs <= std::max(1.0e-4, 2.0e-2 * stats.expected_max_abs);
 }
 
-ParityResult run_parity_fixture(const fs::path &fixture_path, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root) {
+ParityResult run_parity_fixture(const fs::path &fixture_path, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, bool layer_major) {
   ParityFixture fx = load_parity_fixture(fixture_path);
   auto t0 = std::chrono::steady_clock::now();
-  uint64_t bytes_read = 0;
-  int read_calls = 0;
-  std::vector<float> actual = compute_routed_fixture(fx, entries, spans, root, bytes_read, read_calls);
+  RoutedComputeResult compute = compute_routed_fixture(fx, entries, spans, root, layer_major);
   auto t1 = std::chrono::steady_clock::now();
   ParityResult result;
   result.fixture = fixture_path;
   result.layer = fx.layer;
   result.topk = fx.topk;
   result.seq_len = fx.seq_len;
-  result.read_calls = read_calls;
-  result.bytes_read = bytes_read;
+  result.layer_major = layer_major;
+  result.read_calls = compute.read_calls;
+  result.naive_read_calls = compute.naive_read_calls;
+  result.unique_expert_spans = compute.unique_expert_spans;
+  result.dedup_saved_reads = compute.dedup_saved_reads;
+  result.bytes_read = compute.bytes_read;
+  result.naive_bytes_read = compute.naive_bytes_read;
+  result.dedup_saved_bytes = compute.dedup_saved_bytes;
   result.compute_elapsed_s = std::chrono::duration<double>(t1 - t0).count();
-  result.error = compare_vectors(actual, fx.expected_flat);
+  result.error = compare_vectors(compute.actual, fx.expected_flat);
   return result;
 }

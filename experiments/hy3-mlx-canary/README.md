@@ -10,7 +10,7 @@ This repo is **code + metadata only**. It intentionally does not contain model w
 - Lazy SSD sidecar runtime works: resident core stays small and routed experts stream from SSD.
 - Packed layer-major sidecar works and removed the worst Python-GC bottleneck.
 - Local top-4/top-5/top-6 Python lanes are plumbing canaries, not quality lanes; top5/slot16 + prefix prewarm + expert-cache clear is the stable operator lane.
-- First Capstan/C++ substrate exists under `cpp/`: split reusable expert-bank/q4/routed-MLP modules + compact index + contiguous expert-span `pread` benchmark + native slot-bank cache simulation + real router trace replay + routed q4 parity. Full top-8 all-layer expert payload (6.249GiB / 632 spans) reads in ~3.2s warm-cache on the Studio; a real top5/slot16 prefill+decode trace replays 20.853GiB with 1,051 hits / 2,109 misses / 845 evictions; all 79 MoE layers pass native routed parity, and a 4-token all-layer prefill fixture passes with 1,580 expert spans / 15.6226GiB read.
+- First Capstan/C++ substrate exists under `cpp/`: split reusable expert-bank/q4/routed-MLP modules + compact index + contiguous expert-span `pread` benchmark + native slot-bank cache simulation + real router trace replay + routed q4 parity. Full top-8 all-layer expert payload (6.249GiB / 632 spans) reads in ~3.2s warm-cache on the Studio; a real top5/slot16 prefill+decode trace replays 20.853GiB with 1,051 hits / 2,109 misses / 845 evictions. All 79 MoE layers pass native routed parity. Layer-major fixture replay now dedups repeated prompt experts: the 4-token all-layer fixture drops from 1,580 naïve expert reads / 15.6226GiB to 1,408 unique reads / 13.9219GiB with parity intact.
 
 ## Important files
 
@@ -25,7 +25,7 @@ This repo is **code + metadata only**. It intentionally does not contain model w
 | `run_hy3_phipps_slice.sh` | Tiny Phipps slice runner with DS4 restore trap |
 | `hy3_emit_compact_index.py` | Emits compact TSV sidecar index for native/C++ experiments |
 | `hy3_export_layer_fixture.py` | Exports compact Python/MLX routed-layer parity fixtures for native replay |
-| `cpp/` | Split C++20 sidecar substrate, real trace replay, all-layer parity, and prefill fixture replay |
+| `cpp/` | Split C++20 sidecar substrate, real trace replay, all-layer parity, and layer-major prefill dedup replay |
 | `HY3-LAZY-SIDECAR-STATUS.md` | Running status and measured artifacts |
 
 ## Local artifact expectations

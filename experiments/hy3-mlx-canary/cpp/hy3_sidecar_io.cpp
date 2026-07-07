@@ -40,6 +40,7 @@ struct Args {
   int simulate_tokens = 0;
   int slot_bank = 0;
   bool no_read = false;
+  bool layer_major = false;
   std::string checksum = "sample";
   std::string policy = "freq";
   std::string route_pattern = "rolling";
@@ -76,7 +77,7 @@ static void usage() {
   std::cerr << "usage: hy3_sidecar_io --index compact-index.tsv --root sidecar-root "
                "(--fixture parity.json | --fixture-list fixtures.txt | --trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
                "[--simulate-tokens N --slot-bank N --policy lru|freq --route-pattern fixed|hot|rolling] "
-               "[--iterations N] [--checksum sample|full|none] [--no-read]\n";
+               "[--layer-major] [--iterations N] [--checksum sample|full|none] [--no-read]\n";
 }
 
 static Args parse_args(int argc, char **argv) {
@@ -103,6 +104,7 @@ static Args parse_args(int argc, char **argv) {
     else if (key == "--route-pattern") args.route_pattern = need_value("--route-pattern");
     else if (key == "--checksum") args.checksum = need_value("--checksum");
     else if (key == "--no-read") args.no_read = true;
+    else if (key == "--layer-major") args.layer_major = true;
     else if (key == "--help" || key == "-h") { usage(); std::exit(0); }
     else throw std::runtime_error("unknown arg: " + key);
   }
@@ -123,6 +125,9 @@ static Args parse_args(int argc, char **argv) {
   }
   if (args.simulate_tokens > 0 && args.slot_bank < 1) {
     throw std::runtime_error("--simulate-tokens requires --slot-bank >= 1");
+  }
+  if (args.layer_major && args.fixture.empty() && args.fixture_list.empty()) {
+    throw std::runtime_error("--layer-major requires --fixture or --fixture-list");
   }
   if (!args.fixture.empty() || !args.fixture_list.empty()) {
     return args;
@@ -338,19 +343,27 @@ int main(int argc, char **argv) {
     auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
 
     if (!args.fixture.empty()) {
-      ParityResult result = run_parity_fixture(args.fixture, entries, spans, args.root);
+      ParityResult result = run_parity_fixture(args.fixture, entries, spans, args.root, args.layer_major);
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
-      std::cout << "  \"mode\": \"parity-fixture\",\n";
+      std::cout << "  \"mode\": \"" << (args.layer_major ? "parity-fixture-layer-major" : "parity-fixture") << "\",\n";
       std::cout << "  \"fixture\": \"" << json_escape(args.fixture.string()) << "\",\n";
       std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
       std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
       std::cout << "  \"layer\": " << result.layer << ",\n";
       std::cout << "  \"topk\": " << result.topk << ",\n";
       std::cout << "  \"seq_len\": " << result.seq_len << ",\n";
+      std::cout << "  \"layer_major\": " << (result.layer_major ? "true" : "false") << ",\n";
       std::cout << "  \"read_calls\": " << result.read_calls << ",\n";
+      std::cout << "  \"naive_read_calls\": " << result.naive_read_calls << ",\n";
+      std::cout << "  \"unique_expert_spans\": " << result.unique_expert_spans << ",\n";
+      std::cout << "  \"dedup_saved_reads\": " << result.dedup_saved_reads << ",\n";
       std::cout << "  \"bytes_read\": " << result.bytes_read << ",\n";
+      std::cout << "  \"naive_bytes_read\": " << result.naive_bytes_read << ",\n";
+      std::cout << "  \"dedup_saved_bytes\": " << result.dedup_saved_bytes << ",\n";
       std::cout << "  \"gib_read\": " << static_cast<double>(result.bytes_read) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"naive_gib_read\": " << static_cast<double>(result.naive_bytes_read) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"dedup_saved_gib\": " << static_cast<double>(result.dedup_saved_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
       std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
       std::cout << "  \"compute_elapsed_s\": " << result.compute_elapsed_s << ",\n";
       std::cout << "  \"max_abs_error\": " << result.error.max_abs << ",\n";
@@ -372,7 +385,12 @@ int main(int argc, char **argv) {
       results.reserve(fixture_paths.size());
       auto t0 = std::chrono::steady_clock::now();
       uint64_t total_bytes = 0;
+      uint64_t total_naive_bytes = 0;
+      uint64_t total_dedup_saved_bytes = 0;
       int total_read_calls = 0;
+      int total_naive_read_calls = 0;
+      int total_unique_expert_spans = 0;
+      int total_dedup_saved_reads = 0;
       double max_abs = 0.0;
       double max_rel = 0.0;
       double worst_mean_abs = 0.0;
@@ -381,9 +399,14 @@ int main(int argc, char **argv) {
       int worst_rel_layer = -1;
       bool all_pass = true;
       for (const auto &fixture_path : fixture_paths) {
-        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root);
+        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root, args.layer_major);
         total_bytes += result.bytes_read;
+        total_naive_bytes += result.naive_bytes_read;
+        total_dedup_saved_bytes += result.dedup_saved_bytes;
         total_read_calls += result.read_calls;
+        total_naive_read_calls += result.naive_read_calls;
+        total_unique_expert_spans += result.unique_expert_spans;
+        total_dedup_saved_reads += result.dedup_saved_reads;
         all_pass = all_pass && parity_passes(result.error);
         if (result.error.max_abs > max_abs) {
           max_abs = result.error.max_abs;
@@ -401,7 +424,7 @@ int main(int argc, char **argv) {
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
-      std::cout << "  \"mode\": \"parity-fixture-list\",\n";
+      std::cout << "  \"mode\": \"" << (args.layer_major ? "parity-fixture-list-layer-major" : "parity-fixture-list") << "\",\n";
       std::cout << "  \"fixture_list\": \"" << json_escape(args.fixture_list.string()) << "\",\n";
       std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
       std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
@@ -412,9 +435,17 @@ int main(int argc, char **argv) {
         std::cout << results[i].seq_len;
       }
       std::cout << "],\n";
+      std::cout << "  \"layer_major\": " << (args.layer_major ? "true" : "false") << ",\n";
       std::cout << "  \"read_calls\": " << total_read_calls << ",\n";
+      std::cout << "  \"naive_read_calls\": " << total_naive_read_calls << ",\n";
+      std::cout << "  \"unique_expert_spans\": " << total_unique_expert_spans << ",\n";
+      std::cout << "  \"dedup_saved_reads\": " << total_dedup_saved_reads << ",\n";
       std::cout << "  \"bytes_read\": " << total_bytes << ",\n";
+      std::cout << "  \"naive_bytes_read\": " << total_naive_bytes << ",\n";
+      std::cout << "  \"dedup_saved_bytes\": " << total_dedup_saved_bytes << ",\n";
       std::cout << "  \"gib_read\": " << static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"naive_gib_read\": " << static_cast<double>(total_naive_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"dedup_saved_gib\": " << static_cast<double>(total_dedup_saved_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
       std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
       std::cout << "  \"compute_elapsed_s\": " << elapsed << ",\n";
       std::cout << "  \"max_abs_error\": " << max_abs << ",\n";
@@ -438,8 +469,14 @@ int main(int argc, char **argv) {
         std::cout << "    {\"layer\": " << row.layer
                   << ", \"topk\": " << row.topk
                   << ", \"seq_len\": " << row.seq_len
+                  << ", \"layer_major\": " << (row.layer_major ? "true" : "false")
                   << ", \"read_calls\": " << row.read_calls
+                  << ", \"naive_read_calls\": " << row.naive_read_calls
+                  << ", \"unique_expert_spans\": " << row.unique_expert_spans
+                  << ", \"dedup_saved_reads\": " << row.dedup_saved_reads
                   << ", \"bytes_read\": " << row.bytes_read
+                  << ", \"naive_bytes_read\": " << row.naive_bytes_read
+                  << ", \"dedup_saved_bytes\": " << row.dedup_saved_bytes
                   << ", \"compute_elapsed_s\": " << row.compute_elapsed_s
                   << ", \"max_abs_error\": " << row.error.max_abs
                   << ", \"mean_abs_error\": " << row.error.mean_abs

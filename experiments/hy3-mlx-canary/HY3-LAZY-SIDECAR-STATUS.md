@@ -466,15 +466,21 @@ Routed parity is now implemented:
 - All-layer artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-115831-all-layers/`.
 - C++ replay paths: `hy3_sidecar_io --fixture ...` and `hy3_sidecar_io --fixture-list .../fixtures.txt`.
 - C++ implementation is now split into reusable `hy3_expert_bank.*`, `hy3_q4_affine.*`, and `hy3_routed_mlp.*`; the CLI is no longer the math substrate.
+- `--layer-major` fixture replay now dedups repeated prompt experts per routed layer while preserving parity metrics.
 - Prefill4 artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/`.
+- Prefill16 export artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-152258-prefill16-all-layers/`.
 
-| Parity fixture | Fixtures/layers | Seq len | Expert spans | Payload read | Compute wall | Max abs error | Max rel-to-expected | Verdict |
+| Parity fixture | Fixtures/layers | Seq len | Expert spans/read calls | Payload read | Compute wall | Max abs error | Max rel-to-expected | Verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | layer1 top5 BOS routed MoE, before shared MLP | 1 | 1 | 5 | 0.049438GiB | 0.426s | `4.69808e-05` | ~0.0058 | pass `<1e-4` |
 | all MoE layers top5 BOS routed MoE, before shared MLP | 79 | 1 | 395 | 3.90564GiB | 34.87s | `16.9663` on layer 79 | `0.0177684` on layer 75 | pass `max(1e-4, 2% expected max)` |
-| all MoE layers top5 4-token prefill fixture | 79 | 4 | 1,580 | 15.6226GiB | 32.44s | `16.9663` on layer 79 | `0.0141305` on layer 74 | pass `max(1e-4, 2% expected max)` |
+| all MoE layers top5 4-token prefill fixture, naïve replay | 79 | 4 | 1,580 | 15.6226GiB | 225.78s | `16.9663` on layer 79 | `0.0141305` on layer 74 | pass `max(1e-4, 2% expected max)` |
+| all MoE layers top5 4-token prefill fixture, layer-major dedup | 79 | 4 | 1,408 unique / 1,580 naïve | 13.9219GiB | 206.86s | `16.9663` on layer 79 | `0.0141305` on layer 74 | pass; saves 172 reads / 1.70068GiB |
+| all MoE layers top5 16-token prefill fixture, layer-major dedup | 79 | 16 | 3,009 unique / 6,320 naïve | 29.7521GiB | 891.59s | see artifact | `0.0157926` | pass; saves 3,311 reads / 32.7382GiB |
 
-Interpretation: native code can now materialize selected expert banks from the packed sidecar, dequantize MLX q4 affine weights, run `up/gate/down + swiglu + route weighting`, and match Python/MLX across every routed layer for both single-token and short prefill-shaped fixtures. Late-layer absolute errors are large because the expected activation magnitudes are huge; the relative gate is the right ABI/math check here. Next C++ work should turn fixture replay into layer-major execution with expert dedup across prompt tokens.
+Prefill16 export and full layer-major replay scaled the fixture shape to **79** all-layer fixtures with `seq_len=16`: Python/MLX sidecar read **29.752075GiB**, forward-to-layer wall **97.636s**, swap delta **0.0GiB**. C++ layer-major replay passed all layers with **3,009** unique reads vs **6,320** naïve route reads, saving **3,311** reads / **32.7382GiB**; worst relative-to-expected error was `0.0157926`, scalar qlinear wall **891.59s**. The new `--layer-major` mode is the native IO/dedup substrate; next compute work is SIMD/Metal, not more replay plumbing.
+
+Interpretation: native code can now materialize selected expert banks from the packed sidecar, dequantize MLX q4 affine weights, run `up/gate/down + swiglu + route weighting`, and match Python/MLX across every routed layer for both single-token and short prefill-shaped fixtures. The executor now exposes the real layer-major accounting: selected routes vs unique expert loads, bytes saved, and per-layer parity. Late-layer absolute errors are large because the expected activation magnitudes are huge; the relative gate is the right ABI/math check here. Next C++ work should replace scalar q4 matmul with a vectorized kernel and wire route-trace/prompt execution against the same layer-major substrate.
 
 ## DS4 lane cleanup
 

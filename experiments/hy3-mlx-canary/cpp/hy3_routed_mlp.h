@@ -33,25 +33,42 @@ struct ParityResult {
   int layer = 0;
   int topk = 0;
   int seq_len = 1;
+  bool layer_major = false;
   int read_calls = 0;
+  int naive_read_calls = 0;
+  int unique_expert_spans = 0;
+  int dedup_saved_reads = 0;
   uint64_t bytes_read = 0;
+  uint64_t naive_bytes_read = 0;
+  uint64_t dedup_saved_bytes = 0;
   double compute_elapsed_s = 0.0;
   ErrorStats error;
 };
 
 ParityFixture load_parity_fixture(const fs::path &path);
 std::vector<fs::path> load_fixture_list(const fs::path &list_path);
-std::vector<float> compute_routed_fixture(
+struct RoutedComputeResult {
+  std::vector<float> actual;
+  int read_calls = 0;
+  int naive_read_calls = 0;
+  int unique_expert_spans = 0;
+  int dedup_saved_reads = 0;
+  uint64_t bytes_read = 0;
+  uint64_t naive_bytes_read = 0;
+  uint64_t dedup_saved_bytes = 0;
+};
+
+RoutedComputeResult compute_routed_fixture(
     const ParityFixture &fx,
     const std::vector<Entry> &entries,
     const std::unordered_map<uint64_t, Span> &spans,
     const fs::path &root,
-    uint64_t &bytes_read,
-    int &read_calls);
+    bool layer_major = false);
 ErrorStats compare_vectors(const std::vector<float> &actual, const std::vector<float> &expected);
 bool parity_passes(const ErrorStats &stats);
 ParityResult run_parity_fixture(
     const fs::path &fixture_path,
     const std::vector<Entry> &entries,
     const std::unordered_map<uint64_t, Span> &spans,
-    const fs::path &root);
+    const fs::path &root,
+    bool layer_major = false);
