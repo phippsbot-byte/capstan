@@ -12,3 +12,6 @@ add_executable(hy3_sidecar_io
   hy3_routed_mlp.cpp
 )
 target_compile_options(hy3_sidecar_io PRIVATE -Wall -Wextra -Wpedantic -O3)
+if(APPLE)
+  target_link_libraries(hy3_sidecar_io PRIVATE "-framework Accelerate")
+endif()
