@@ -1,0 +1,12 @@
+# Keep this experiment source-only.
+__pycache__/
+*.pyc
+*.log
+*.pid.json
+*.safetensors
+*.bin
+*.tmp
+logs/
+models/
+sidecar/
+*-sidecar/

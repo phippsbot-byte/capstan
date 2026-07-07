@@ -1,0 +1,41 @@
+[model]
+id = "hy3-preview-mlx-canary"
+model_id = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-served"
+endpoint = "http://127.0.0.1:8133/v1"
+description = "Guarded Studio canary for mlx-community/Hy3-preview-4bit; runtime-shape probe only, not production Hy3."
+
+[start]
+command = ["bash", "-lc", "cd /Users/nb/LLM/hy3-mlx-canary && exec ./run_canary_server.sh"]
+cwd = "/Users/nb/LLM/hy3-mlx-canary"
+log_path = "/Volumes/ModelSSD/logs/hy3-mlx-canary/modelctl-server.log"
+pid_path = "/Users/nb/.local/state/modelctl/hy3-preview-mlx-canary.pid.json"
+startup_timeout_sec = 900
+readiness_url = "http://127.0.0.1:8133/v1/models"
+readiness_contains = "Hy3-preview-4bit-MLX-served"
+
+[preflight]
+required_paths = [
+  "/Users/nb/LLM/hy3-mlx-canary/run_canary_server.sh",
+  "/Users/nb/LLM/hy3-mlx-canary/prepare_overlay.py",
+  "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX/config.json",
+  "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX/model.safetensors.index.json",
+  "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-served/config.json",
+]
+exclusive_ports = [8133]
+max_swap_gib = 64
+
+[[preflight.disk]]
+path = "/Volumes/ModelSSD"
+min_free_gib = 400
+
+[health]
+max_swap_gib = 96
+max_swap_delta_gib = 4
+sample_sec = 5
+
+[smoke]
+prompt = "Reply with exactly the word pong."
+expect = "pong"
+max_tokens = 32
+temperature = 0
+timeout_sec = 240
