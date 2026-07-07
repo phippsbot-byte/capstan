@@ -130,6 +130,13 @@ static Args parse_args(int argc, char **argv) {
   }
   if (args.route_exec) {
     if (args.fixture_list.empty()) throw std::runtime_error("--route-exec requires --fixture-list");
+    if (!args.fixture.empty()) throw std::runtime_error("--route-exec cannot be combined with --fixture");
+    if (!args.trace.empty()) throw std::runtime_error("--route-exec cannot be combined with --trace; TSV traces are cache/IO-only");
+    if (args.no_read) throw std::runtime_error("--route-exec cannot be combined with --no-read");
+    if (args.iterations != 1) throw std::runtime_error("--route-exec does not support --iterations");
+    if (args.layer.has_value() || !args.explicit_layers.empty() || !args.experts.empty() || args.topk > 0 || args.simulate_tokens > 0) {
+      throw std::runtime_error("--route-exec only accepts --fixture-list plus index/root options");
+    }
     args.layer_major = true;
   }
   if (args.layer_major && args.fixture.empty() && args.fixture_list.empty()) {
@@ -406,6 +413,9 @@ int main(int argc, char **argv) {
       double worst_rmse = 0.0;
       int worst_layer = -1;
       int worst_rel_layer = -1;
+      std::vector<int> layers;
+      std::vector<int> failed_layers;
+      int previous_layer = -1;
       bool all_pass = true;
       for (const auto &fixture_path : fixture_paths) {
         ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root, true);
@@ -413,6 +423,11 @@ int main(int argc, char **argv) {
         if (topk < 0) topk = result.topk;
         if (result.seq_len != seq_len) throw std::runtime_error("--route-exec fixture list has mixed seq_len values");
         if (result.topk != topk) throw std::runtime_error("--route-exec fixture list has mixed topk values");
+        if (result.layer <= previous_layer) throw std::runtime_error("--route-exec fixture layers must be strictly increasing and unique");
+        previous_layer = result.layer;
+        layers.push_back(result.layer);
+        bool layer_pass = parity_passes(result.error);
+        if (!layer_pass) failed_layers.push_back(result.layer);
         total_bytes += result.bytes_read;
         total_naive_bytes += result.naive_bytes_read;
         total_dedup_saved_bytes += result.dedup_saved_bytes;
@@ -421,7 +436,7 @@ int main(int argc, char **argv) {
         total_unique_expert_spans += result.unique_expert_spans;
         total_dedup_saved_reads += result.dedup_saved_reads;
         token_layer_events += result.seq_len;
-        all_pass = all_pass && parity_passes(result.error);
+        all_pass = all_pass && layer_pass;
         if (result.error.max_abs > max_abs) {
           max_abs = result.error.max_abs;
           worst_mean_abs = result.error.mean_abs;
@@ -438,14 +453,21 @@ int main(int argc, char **argv) {
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
-      std::cout << "  \"mode\": \"prompt-route-exec\",\n";
+      std::cout << "  \"mode\": \"prompt-routed-moe-fixture-exec\",\n";
       std::cout << "  \"execution_scope\": \"routed_moe_only\",\n";
-      std::cout << "  \"input_schema\": \"hy3-routed-layer-parity-v2-fixture-list\",\n";
+      std::cout << "  \"input_schema\": \"hy3-routed-layer-parity-fixture-list\",\n";
+      std::cout << "  \"input_validation\": \"shape_and_strictly_increasing_layers\",\n";
       std::cout << "  \"fixture_list\": \"" << json_escape(args.fixture_list.string()) << "\",\n";
       std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
       std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
       std::cout << "  \"fixtures\": " << results.size() << ",\n";
-      std::cout << "  \"layers\": " << results.size() << ",\n";
+      std::cout << "  \"layer_count\": " << layers.size() << ",\n";
+      std::cout << "  \"layers\": [";
+      for (size_t i = 0; i < layers.size(); ++i) {
+        if (i) std::cout << ", ";
+        std::cout << layers[i];
+      }
+      std::cout << "],\n";
       std::cout << "  \"seq_len\": " << seq_len << ",\n";
       std::cout << "  \"topk\": " << topk << ",\n";
       std::cout << "  \"token_layer_events\": " << token_layer_events << ",\n";
@@ -470,6 +492,13 @@ int main(int argc, char **argv) {
       std::cout << "  \"worst_rel_layer\": " << worst_rel_layer << ",\n";
       std::cout << "  \"parity_abs_floor\": 0.0001,\n";
       std::cout << "  \"parity_rel_threshold\": 0.02,\n";
+      std::cout << "  \"failed_layer_count\": " << failed_layers.size() << ",\n";
+      std::cout << "  \"failed_layers\": [";
+      for (size_t i = 0; i < failed_layers.size(); ++i) {
+        if (i) std::cout << ", ";
+        std::cout << failed_layers[i];
+      }
+      std::cout << "],\n";
       std::cout << "  \"parity_pass\": " << (all_pass ? "true" : "false") << "\n";
       std::cout << "}\n";
       return 0;

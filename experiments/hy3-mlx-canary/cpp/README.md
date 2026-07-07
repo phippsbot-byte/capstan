@@ -172,12 +172,14 @@ routed outputs for each MoE layer:
   --route-exec
 ```
 
-`--route-exec` is the honest prompt/routed-MoE execution path: it requires the
-rich parity fixture list because the older route TSV only has expert IDs, not the
+`--route-exec` is the routed-MoE fixture execution path: it requires the rich
+parity fixture list because the older route TSV only has expert IDs, not the
 hidden activations, route weights, or expected routed outputs needed for math.
 It implies layer-major dense q4 execution, preserves token/top-k accumulation
-order, and reports prompt-level totals (`token_layer_events`, `selected_routes`,
-unique reads/bytes, parity). Use the TSV `--trace` path only for cache/IO replay.
+order, rejects incompatible cache/IO flags, validates uniform shape plus strictly
+increasing unique layers, and reports prompt-slice totals (`token_layer_events`,
+`selected_routes`, unique reads/bytes, tolerance-parity). Use the TSV `--trace`
+path only for cache/IO replay.
 
 Prefill4 artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/`.
 The split C++ substrate replayed **79** fixtures with `seq_len=4`, read
@@ -197,5 +199,7 @@ forward-to-layer wall **97.636s**, and swap delta **0.0GiB**. Full C++ layer-maj
 replay passed all 79 layers with **3,009** unique reads vs **6,320** naïve route
 reads, saving **3,311** reads / **32.7382GiB**; worst relative-to-expected error
 was `0.0157937`. Apple Accelerate qlinear plus expert-major dense reuse cuts the
-order-preserving layer-major wall from **899.48s** to **239.45s**. Next compute
-cut is route-trace/prompt execution plumbing and then lower-level Metal/SIMD kernels.
+order-preserving layer-major wall from **899.48s** to **239.45s**. `--route-exec`
+reports the same routed-MoE math as a fixture-backed prompt-slice execution path;
+next cuts are real prompt integration beyond captured fixtures and lower-level
+Metal/SIMD kernels.
