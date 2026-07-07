@@ -41,3 +41,41 @@ layers:
 
 Expected output is JSON with `ok=true`, bytes/read counts, elapsed seconds,
 throughput, and an FNV checksum so the compiler cannot optimize away the reads.
+
+## Cache scheduler simulation
+
+Model a native slot-bank cache before wiring real kernels. This exercises the same
+sidecar spans while tracking cache hits, misses, evictions, final cache footprint,
+and bytes that would cross the sidecar boundary.
+
+Repeated full-top8 trace — should load once, then hit cache:
+
+```bash
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --layers 1-79 --topk 8 \
+  --simulate-tokens 4 --slot-bank 16 --policy freq --route-pattern fixed
+```
+
+Approximate top5 hot trace — two-token expert set repeated over eight tokens:
+
+```bash
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --layers 1-79 --topk 5 \
+  --simulate-tokens 8 --slot-bank 16 --policy freq --route-pattern hot
+```
+
+Adversarial rolling trace — churns through more experts than slot-bank 16 can retain:
+
+```bash
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --layers 1-79 --topk 5 \
+  --simulate-tokens 8 --slot-bank 16 --policy freq --route-pattern rolling
+```
+
+Current benchmark artifact: `cpp/results/20260707-sidecar-io.json`.

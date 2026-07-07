@@ -36,6 +36,7 @@ After removing explicit per-expert `gc.collect()` from the hot path:
 - top-4 + slot-bank 32 also passed exact JSON and tool-shaped JSON canaries
 - tiny OpenAI-compatible canary server exists at `hy3_openai_server.py`; smoke-passed `/v1/models`, exact `pong`, exact JSON, and OpenAI-style parsed tool call
 - top5/slot16 + prefix prewarm + expert-cache clear is the stable Python operator lane; top6 was slower and worse on the tiny Phipps slice
-- first C++20 substrate lives under `cpp/`: compact TSV sidecar index + contiguous expert-span `pread`; full top-8 all-layer expert payload reads 6.249GiB / 632 spans in ~3.1s warm-cache on the Studio
+- first C++20 substrate lives under `cpp/`: compact TSV sidecar index + contiguous expert-span `pread`; full top-8 all-layer expert payload reads 6.249GiB / 632 spans in ~3.2s warm-cache on the Studio
+- native slot-bank/cache scheduler now models layer-major read pressure before kernel work; top8 fixed 4-token trace at slot16 reads once then hits cache, top5 hot 8-token trace reads 7.811GiB with no evictions, adversarial top5 rolling churn reads 31.245GiB and evicts 1,896 spans
 
-Next useful work: wire the native sidecar substrate into layer-major prefill/decode kernels. Python canary work should be frozen unless a very specific smoke needs it.
+Next useful work: feed real router traces into the native scheduler, then wire the substrate into layer-major prefill/decode kernels. Python canary work should be frozen unless a very specific smoke needs it.

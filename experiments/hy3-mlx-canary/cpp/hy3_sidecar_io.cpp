@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <unistd.h>
@@ -47,8 +48,12 @@ struct Args {
   std::vector<int> experts;
   int topk = 0;
   int iterations = 1;
+  int simulate_tokens = 0;
+  int slot_bank = 0;
   bool no_read = false;
   std::string checksum = "sample";
+  std::string policy = "freq";
+  std::string route_pattern = "rolling";
 };
 
 static std::vector<std::string> split(const std::string &s, char delim) {
@@ -81,6 +86,7 @@ static std::vector<int> parse_layers(const std::string &s) {
 static void usage() {
   std::cerr << "usage: hy3_sidecar_io --index compact-index.tsv --root sidecar-root "
                "(--layer N --experts a,b,c | --layers A-B --topk K) "
+               "[--simulate-tokens N --slot-bank N --policy lru|freq --route-pattern fixed|hot|rolling] "
                "[--iterations N] [--checksum sample|full|none] [--no-read]\n";
 }
 
@@ -99,6 +105,10 @@ static Args parse_args(int argc, char **argv) {
     else if (key == "--experts") args.experts = parse_csv_ints(need_value("--experts"));
     else if (key == "--topk") args.topk = std::stoi(need_value("--topk"));
     else if (key == "--iterations") args.iterations = std::stoi(need_value("--iterations"));
+    else if (key == "--simulate-tokens") args.simulate_tokens = std::stoi(need_value("--simulate-tokens"));
+    else if (key == "--slot-bank") args.slot_bank = std::stoi(need_value("--slot-bank"));
+    else if (key == "--policy") args.policy = need_value("--policy");
+    else if (key == "--route-pattern") args.route_pattern = need_value("--route-pattern");
     else if (key == "--checksum") args.checksum = need_value("--checksum");
     else if (key == "--no-read") args.no_read = true;
     else if (key == "--help" || key == "-h") { usage(); std::exit(0); }
@@ -109,6 +119,18 @@ static Args parse_args(int argc, char **argv) {
   if (args.iterations < 1) throw std::runtime_error("--iterations must be >= 1");
   if (!(args.checksum == "sample" || args.checksum == "full" || args.checksum == "none")) {
     throw std::runtime_error("--checksum must be sample, full, or none");
+  }
+  if (!(args.policy == "lru" || args.policy == "freq")) {
+    throw std::runtime_error("--policy must be lru or freq");
+  }
+  if (!(args.route_pattern == "fixed" || args.route_pattern == "hot" || args.route_pattern == "rolling")) {
+    throw std::runtime_error("--route-pattern must be fixed, hot, or rolling");
+  }
+  if (args.simulate_tokens < 0 || args.slot_bank < 0) {
+    throw std::runtime_error("--simulate-tokens and --slot-bank must be non-negative");
+  }
+  if (args.simulate_tokens > 0 && args.slot_bank < 1) {
+    throw std::runtime_error("--simulate-tokens requires --slot-bank >= 1");
   }
   if (args.layer.has_value()) {
     if (args.experts.empty()) throw std::runtime_error("--layer requires --experts");
@@ -251,6 +273,89 @@ static void read_exact(int fd, uint64_t offset, std::vector<uint8_t> &buf) {
   }
 }
 
+struct RunStats {
+  uint64_t bytes_read = 0;
+  uint64_t read_calls = 0;
+  uint64_t cache_hits = 0;
+  uint64_t cache_misses = 0;
+  uint64_t evictions = 0;
+  uint64_t checksum = 1469598103934665603ull;
+};
+
+struct CacheEntry {
+  uint64_t freq = 0;
+  uint64_t last_use = 0;
+  uint64_t nbytes = 0;
+};
+
+static std::vector<int> route_experts(int layer, int token, int topk, const std::string &pattern) {
+  std::vector<int> out;
+  std::unordered_set<int> seen;
+  int seed = 0;
+  if (pattern == "fixed") seed = 0;
+  else if (pattern == "hot") seed = (token % 2) * 17 + layer * 13;
+  else seed = token * 17 + layer * 13;
+  for (int k = 0; static_cast<int>(out.size()) < topk; ++k) {
+    int expert = (seed + k * 31) % 192;
+    if (seen.insert(expert).second) out.push_back(expert);
+  }
+  return out;
+}
+
+static void touch_or_load(
+    const Span &span,
+    const Args &args,
+    FdCache &fds,
+    std::vector<uint8_t> &buf,
+    std::unordered_map<int, std::unordered_map<int, CacheEntry>> &cache,
+    uint64_t tick,
+    RunStats &stats) {
+  auto &layer_cache = cache[span.layer];
+  auto hit = layer_cache.find(span.expert);
+  if (hit != layer_cache.end()) {
+    hit->second.freq += 1;
+    hit->second.last_use = tick;
+    stats.cache_hits += 1;
+    return;
+  }
+
+  stats.cache_misses += 1;
+  if (static_cast<int>(layer_cache.size()) >= args.slot_bank) {
+    auto victim = layer_cache.begin();
+    for (auto it = layer_cache.begin(); it != layer_cache.end(); ++it) {
+      bool take = false;
+      if (args.policy == "lru") {
+        take = it->second.last_use < victim->second.last_use;
+      } else {
+        take = (it->second.freq < victim->second.freq) ||
+               (it->second.freq == victim->second.freq && it->second.last_use < victim->second.last_use);
+      }
+      if (take) victim = it;
+    }
+    layer_cache.erase(victim);
+    stats.evictions += 1;
+  }
+
+  if (!args.no_read) {
+    int fd = fds.get(span.file);
+    buf.resize(static_cast<size_t>(span.nbytes));
+    read_exact(fd, span.offset, buf);
+    if (args.checksum == "full") stats.checksum = fnv1a_update(stats.checksum, buf);
+    else if (args.checksum == "sample") stats.checksum = fnv1a_update_sample(stats.checksum, buf);
+    stats.bytes_read += span.nbytes;
+    stats.read_calls += 1;
+  }
+  layer_cache[span.expert] = CacheEntry{1, tick, span.nbytes};
+}
+
+static uint64_t cache_bytes(const std::unordered_map<int, std::unordered_map<int, CacheEntry>> &cache) {
+  uint64_t total = 0;
+  for (const auto &[_, layer_cache] : cache) {
+    for (const auto &[__, entry] : layer_cache) total += entry.nbytes;
+  }
+  return total;
+}
+
 static std::string json_escape(const std::string &s) {
   std::string out;
   for (char c : s) {
@@ -289,6 +394,63 @@ int main(int argc, char **argv) {
     uint64_t planned_bytes = 0;
     for (const auto &s : plan) planned_bytes += s.nbytes;
 
+    auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
+
+    if (args.simulate_tokens > 0) {
+      FdCache fds(args.root);
+      std::vector<uint8_t> buf;
+      std::unordered_map<int, std::unordered_map<int, CacheEntry>> cache;
+      RunStats stats;
+      uint64_t tick = 0;
+      auto t_read0 = std::chrono::steady_clock::now();
+      for (int iter = 0; iter < args.iterations; ++iter) {
+        for (int token = 0; token < args.simulate_tokens; ++token) {
+          for (int layer : args.explicit_layers) {
+            for (int expert : route_experts(layer, token, args.topk, args.route_pattern)) {
+              auto it = spans.find(span_key(layer, expert));
+              if (it == spans.end()) throw std::runtime_error("missing span for simulated layer/expert");
+              touch_or_load(it->second, args, fds, buf, cache, ++tick, stats);
+            }
+          }
+        }
+      }
+      auto t_read1 = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration<double>(t_read1 - t_read0).count();
+      double gib = static_cast<double>(stats.bytes_read) / (1024.0 * 1024.0 * 1024.0);
+      double gib_s = elapsed > 0.0 ? gib / elapsed : 0.0;
+      uint64_t final_cache_bytes = cache_bytes(cache);
+      std::cout << "{\n";
+      std::cout << "  \"ok\": true,\n";
+      std::cout << "  \"mode\": \"cache-sim\",\n";
+      std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
+      std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
+      std::cout << "  \"index_entries\": " << entries.size() << ",\n";
+      std::cout << "  \"expert_spans\": " << spans.size() << ",\n";
+      std::cout << "  \"layers\": " << args.explicit_layers.size() << ",\n";
+      std::cout << "  \"topk\": " << args.topk << ",\n";
+      std::cout << "  \"simulate_tokens\": " << args.simulate_tokens << ",\n";
+      std::cout << "  \"slot_bank\": " << args.slot_bank << ",\n";
+      std::cout << "  \"policy\": \"" << json_escape(args.policy) << "\",\n";
+      std::cout << "  \"route_pattern\": \"" << json_escape(args.route_pattern) << "\",\n";
+      std::cout << "  \"iterations\": " << args.iterations << ",\n";
+      std::cout << "  \"cache_hits\": " << stats.cache_hits << ",\n";
+      std::cout << "  \"cache_misses\": " << stats.cache_misses << ",\n";
+      std::cout << "  \"evictions\": " << stats.evictions << ",\n";
+      std::cout << "  \"read_calls\": " << stats.read_calls << ",\n";
+      std::cout << "  \"bytes_read\": " << stats.bytes_read << ",\n";
+      std::cout << "  \"gib_read\": " << gib << ",\n";
+      std::cout << "  \"final_cache_bytes\": " << final_cache_bytes << ",\n";
+      std::cout << "  \"final_cache_gib\": " << static_cast<double>(final_cache_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
+      std::cout << "  \"read_elapsed_s\": " << elapsed << ",\n";
+      std::cout << "  \"gib_per_s\": " << gib_s << ",\n";
+      std::cout << "  \"checksum_fnv1a64\": \"0x" << std::hex << stats.checksum << std::dec << "\",\n";
+      std::cout << "  \"checksum_mode\": \"" << json_escape(args.checksum) << "\",\n";
+      std::cout << "  \"no_read\": " << (args.no_read ? "true" : "false") << "\n";
+      std::cout << "}\n";
+      return 0;
+    }
+
     FdCache fds(args.root);
     uint64_t checksum = 1469598103934665603ull;
     uint64_t bytes_read = 0;
@@ -310,7 +472,6 @@ int main(int argc, char **argv) {
     auto t_read1 = std::chrono::steady_clock::now();
 
     auto elapsed = std::chrono::duration<double>(t_read1 - t_read0).count();
-    auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
     double gib = static_cast<double>(bytes_read) / (1024.0 * 1024.0 * 1024.0);
     double gib_s = elapsed > 0.0 ? gib / elapsed : 0.0;
 

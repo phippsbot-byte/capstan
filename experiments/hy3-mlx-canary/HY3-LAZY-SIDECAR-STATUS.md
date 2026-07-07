@@ -294,7 +294,17 @@ Verified on the Studio:
 | layer1 top8 read | 8 | 8 | 0.079GiB | 0.028s | 2.78GiB/s | `0x71ee6d2d6ebd0576` |
 | all MoE layers top8 read | 632 | 632 | 6.249GiB | 3.118s | 2.00GiB/s | `0x1e173ad573437fa4` |
 
-This is warm-filesystem IO, not a cold-drive worst case. Still, native sidecar IO is now clearly cheap enough to proceed. Next C++ step: wire this substrate into layer-major prefill/decode kernels and stop using Python/MLX request glue as the product path.
+This is warm-filesystem IO, not a cold-drive worst case. Still, native sidecar IO is now clearly cheap enough to proceed.
+
+Native slot-bank/cache scheduling is now implemented in the same C++ substrate via `--simulate-tokens`, `--slot-bank`, `--policy`, and deterministic route patterns (`fixed`, `hot`, `rolling`). Updated artifact: `cpp/results/20260707-sidecar-io.json`.
+
+| Cache sim | Hits | Misses | Evictions | Payload read | Read wall | Final cache |
+|---|---:|---:|---:|---:|---:|---:|
+| top8 fixed, 4 tokens, slot16 | 1,896 | 632 | 0 | 6.249GiB | 2.406s | 6.249GiB |
+| top5 hot, 8 tokens, slot16 | 2,370 | 790 | 0 | 7.811GiB | 3.683s | 7.811GiB |
+| top5 rolling, 8 tokens, slot16 | 0 | 3,160 | 1,896 | 31.245GiB | 13.029s | 12.498GiB |
+
+Interpretation: native scheduling matches the Python lesson. If routing has locality, slot-bank 16 is enough to keep repeated expert sets hot; if routing churns adversarially, IO explodes even before compute. Next C++ step: consume real router traces / wire layer-major prefill-decode kernels and stop using Python/MLX request glue as the product path.
 
 ## DS4 lane cleanup
 
