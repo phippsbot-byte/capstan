@@ -291,7 +291,8 @@ _STORE: Hy3SidecarStore | None = None
 _PROFILE: list[dict[str, Any]] = []
 _ROUTE_TRACE: list[dict[str, Any]] = []
 _ROUTE_EVENT = 0
-_PARITY_FIXTURE: dict[str, Any] | None = None
+_PARITY_FIXTURES: list[dict[str, Any]] = []
+_PARITY_CAPTURED_LAYERS: set[int] = set()
 _MOE_TIMES: dict[str, float] = {
     "router_s": 0.0,
     "selection_s": 0.0,
@@ -374,20 +375,44 @@ def write_route_trace_tsv(path: str | os.PathLike[str], metadata: Optional[dict[
 
 
 def parity_capture_enabled() -> bool:
-    return os.environ.get("HY3_PARITY_LAYER") not in {None, ""}
+    return os.environ.get("HY3_PARITY_LAYER") not in {None, ""} or os.environ.get("HY3_PARITY_LAYERS") not in {None, ""}
+
+
+def parse_parity_layers() -> Optional[set[int]]:
+    raw = os.environ.get("HY3_PARITY_LAYERS")
+    if raw:
+        if raw.lower() == "all":
+            return None
+        out: set[int] = set()
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start, end = part.split("-", 1)
+                out.update(range(int(start), int(end) + 1))
+            else:
+                out.add(int(part))
+        return out
+    raw = os.environ.get("HY3_PARITY_LAYER")
+    if raw:
+        return {int(raw)}
+    return set()
 
 
 def reset_parity_fixture() -> None:
-    global _PARITY_FIXTURE
-    _PARITY_FIXTURE = None
+    _PARITY_FIXTURES.clear()
+    _PARITY_CAPTURED_LAYERS.clear()
 
 
 def capture_parity_fixture(layer: int, x: mx.array, indices: mx.array, route_weights: mx.array, routed_output: mx.array) -> None:
-    global _PARITY_FIXTURE
-    if not parity_capture_enabled() or _PARITY_FIXTURE is not None:
+    if not parity_capture_enabled():
         return
-    target_layer = int(os.environ["HY3_PARITY_LAYER"])
-    if int(layer) != target_layer:
+    layer = int(layer)
+    target_layers = parse_parity_layers()
+    if target_layers is not None and layer not in target_layers:
+        return
+    if layer in _PARITY_CAPTURED_LAYERS:
         return
     token = int(os.environ.get("HY3_PARITY_TOKEN", "0"))
     batch = int(os.environ.get("HY3_PARITY_BATCH", "0"))
@@ -398,35 +423,60 @@ def capture_parity_fixture(layer: int, x: mx.array, indices: mx.array, route_wei
     hidden_np = np.array(x[batch, token].astype(mx.float32))
     weights_np = np.array(route_weights[batch, token].astype(mx.float32))
     output_np = np.array(routed_output[batch, token].astype(mx.float32))
-    _PARITY_FIXTURE = {
-        "schema": "hy3-routed-layer-parity-v1",
-        "layer": int(layer),
-        "batch": batch,
-        "token": token,
-        "hidden_size": int(hidden_np.shape[-1]),
-        "output_size": int(output_np.shape[-1]),
-        "topk": int(idx_np.shape[-1]),
-        "experts": [int(v) for v in idx_np[batch, token].tolist()],
-        "route_weights": [float(v) for v in weights_np.tolist()],
-        "hidden": [float(v) for v in hidden_np.tolist()],
-        "expected_routed": [float(v) for v in output_np.tolist()],
-    }
+    _PARITY_FIXTURES.append(
+        {
+            "schema": "hy3-routed-layer-parity-v1",
+            "layer": layer,
+            "batch": batch,
+            "token": token,
+            "hidden_size": int(hidden_np.shape[-1]),
+            "output_size": int(output_np.shape[-1]),
+            "topk": int(idx_np.shape[-1]),
+            "experts": [int(v) for v in idx_np[batch, token].tolist()],
+            "route_weights": [float(v) for v in weights_np.tolist()],
+            "hidden": [float(v) for v in hidden_np.tolist()],
+            "expected_routed": [float(v) for v in output_np.tolist()],
+        }
+    )
+    _PARITY_CAPTURED_LAYERS.add(layer)
 
 
 def get_parity_fixture() -> dict[str, Any] | None:
-    return _PARITY_FIXTURE
+    return _PARITY_FIXTURES[0] if _PARITY_FIXTURES else None
+
+
+def get_parity_fixtures() -> list[dict[str, Any]]:
+    return list(_PARITY_FIXTURES)
 
 
 def write_parity_fixture(path: str | os.PathLike[str], metadata: Optional[dict[str, Any]] = None) -> str:
-    if _PARITY_FIXTURE is None:
+    fixture = get_parity_fixture()
+    if fixture is None:
         raise RuntimeError("no parity fixture captured")
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    payload = dict(_PARITY_FIXTURE)
+    payload = dict(fixture)
     if metadata:
         payload["metadata"] = metadata
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return str(out)
+
+
+def write_parity_fixtures(out_dir: str | os.PathLike[str], metadata: Optional[dict[str, Any]] = None) -> list[str]:
+    if not _PARITY_FIXTURES:
+        raise RuntimeError("no parity fixtures captured")
+    root = Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    paths: list[str] = []
+    for fixture in sorted(_PARITY_FIXTURES, key=lambda row: int(row["layer"])):
+        payload = dict(fixture)
+        if metadata:
+            payload["metadata"] = metadata
+        path = root / f"hy3-layer{fixture['layer']}-top{fixture['topk']}-token{fixture['token']}.json"
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        paths.append(str(path))
+    (root / "fixtures.txt").write_text("\n".join(paths) + "\n", encoding="utf-8")
+    return paths
 
 
 def shared_mlp_disabled() -> bool:
@@ -460,6 +510,7 @@ def eval_for_timing(*arrays: Any) -> None:
 def reset_profile() -> None:
     _PROFILE.clear()
     reset_route_trace()
+    reset_parity_fixture()
     for key in _MOE_TIMES:
         _MOE_TIMES[key] = 0.0
 

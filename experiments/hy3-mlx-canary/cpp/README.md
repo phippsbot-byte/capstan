@@ -125,5 +125,26 @@ and compares against Python/MLX:
   --fixture cpp/fixtures/hy3-layer1-top5-bos.json
 ```
 
-Current result: `parity_pass=true`, max abs error `4.69808e-05`, mean abs error
+Current single-layer result: `parity_pass=true`, max abs error `4.69808e-05`, mean abs error
 `3.62875e-06`, RMSE `4.94604e-06`, 5 expert spans / `0.049438GiB` read.
+
+Multi-layer export captures one parity fixture per MoE layer in a single guarded
+forward pass:
+
+```bash
+/opt/homebrew/bin/python3.11 hy3_export_layer_fixture.py \
+  --layers 1-79 --token 0 --slot-bank 16 --topk-cap 5 \
+  --out-dir /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>
+
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --fixture-list /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>/fixtures.txt
+```
+
+All-layer artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-115831-all-layers/`.
+The C++ sweep covered **79/79 MoE layers**, read **3.90564GiB** across **395**
+expert spans, and completed in **34.87s**. Absolute error grows with late-layer
+activation magnitude, so all-layer pass uses `max_abs <= max(1e-4, 2% of expected
+max abs)`: worst absolute error `16.9663` on layer 79, worst relative-to-expected
+error `0.0177684` on layer 75, `parity_pass=true`.

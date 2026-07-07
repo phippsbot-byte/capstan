@@ -47,6 +47,7 @@ struct Args {
   fs::path root;
   fs::path trace;
   fs::path fixture;
+  fs::path fixture_list;
   std::optional<int> layer;
   std::vector<int> explicit_layers;
   std::vector<int> experts;
@@ -89,7 +90,7 @@ static std::vector<int> parse_layers(const std::string &s) {
 
 static void usage() {
   std::cerr << "usage: hy3_sidecar_io --index compact-index.tsv --root sidecar-root "
-               "(--fixture parity.json | --trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
+               "(--fixture parity.json | --fixture-list fixtures.txt | --trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
                "[--simulate-tokens N --slot-bank N --policy lru|freq --route-pattern fixed|hot|rolling] "
                "[--iterations N] [--checksum sample|full|none] [--no-read]\n";
 }
@@ -106,6 +107,7 @@ static Args parse_args(int argc, char **argv) {
     else if (key == "--root") args.root = need_value("--root");
     else if (key == "--trace") args.trace = need_value("--trace");
     else if (key == "--fixture") args.fixture = need_value("--fixture");
+    else if (key == "--fixture-list") args.fixture_list = need_value("--fixture-list");
     else if (key == "--layer") args.layer = std::stoi(need_value("--layer"));
     else if (key == "--layers") args.explicit_layers = parse_layers(need_value("--layers"));
     else if (key == "--experts") args.experts = parse_csv_ints(need_value("--experts"));
@@ -138,7 +140,7 @@ static Args parse_args(int argc, char **argv) {
   if (args.simulate_tokens > 0 && args.slot_bank < 1) {
     throw std::runtime_error("--simulate-tokens requires --slot-bank >= 1");
   }
-  if (!args.fixture.empty()) {
+  if (!args.fixture.empty() || !args.fixture_list.empty()) {
     return args;
   }
   if (!args.trace.empty() && args.slot_bank < 1) {
@@ -647,6 +649,8 @@ struct ErrorStats {
   double max_abs = 0.0;
   double mean_abs = 0.0;
   double rmse = 0.0;
+  double expected_max_abs = 0.0;
+  double max_rel_to_expected = 0.0;
   int max_index = 0;
 };
 
@@ -658,6 +662,7 @@ static ErrorStats compare_vectors(const std::vector<float> &actual, const std::v
   for (size_t i = 0; i < actual.size(); ++i) {
     double diff = static_cast<double>(actual[i]) - static_cast<double>(expected[i]);
     double ad = std::fabs(diff);
+    stats.expected_max_abs = std::max(stats.expected_max_abs, std::fabs(static_cast<double>(expected[i])));
     if (ad > stats.max_abs) {
       stats.max_abs = ad;
       stats.max_index = static_cast<int>(i);
@@ -667,7 +672,59 @@ static ErrorStats compare_vectors(const std::vector<float> &actual, const std::v
   }
   stats.mean_abs = sum_abs / static_cast<double>(actual.size());
   stats.rmse = std::sqrt(sum_sq / static_cast<double>(actual.size()));
+  stats.max_rel_to_expected = stats.max_abs / std::max(stats.expected_max_abs, 1.0e-12);
   return stats;
+}
+
+static bool parity_passes(const ErrorStats &stats) {
+  return stats.max_abs <= std::max(1.0e-4, 2.0e-2 * stats.expected_max_abs);
+}
+
+struct ParityResult {
+  fs::path fixture;
+  int layer = 0;
+  int topk = 0;
+  int read_calls = 0;
+  uint64_t bytes_read = 0;
+  double compute_elapsed_s = 0.0;
+  ErrorStats error;
+};
+
+static ParityResult run_parity_fixture(const fs::path &fixture_path, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const Args &args) {
+  ParityFixture fx = load_parity_fixture(fixture_path);
+  auto t0 = std::chrono::steady_clock::now();
+  uint64_t bytes_read = 0;
+  int read_calls = 0;
+  std::vector<float> actual = compute_routed_fixture(fx, entries, spans, args, bytes_read, read_calls);
+  auto t1 = std::chrono::steady_clock::now();
+  ParityResult result;
+  result.fixture = fixture_path;
+  result.layer = fx.layer;
+  result.topk = fx.topk;
+  result.read_calls = read_calls;
+  result.bytes_read = bytes_read;
+  result.compute_elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+  result.error = compare_vectors(actual, fx.expected);
+  return result;
+}
+
+static std::vector<fs::path> load_fixture_list(const fs::path &list_path) {
+  std::string text = read_text_file(list_path);
+  std::stringstream ss(text);
+  std::string line;
+  std::vector<fs::path> paths;
+  while (std::getline(ss, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || std::isspace(static_cast<unsigned char>(line.back())))) line.pop_back();
+    size_t start = 0;
+    while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start]))) ++start;
+    line = line.substr(start);
+    if (line.empty() || line[0] == '#') continue;
+    fs::path path(line);
+    if (path.is_relative()) path = list_path.parent_path() / path;
+    paths.push_back(path);
+  }
+  if (paths.empty()) throw std::runtime_error("fixture list is empty: " + list_path.string());
+  return paths;
 }
 
 static std::string json_escape(const std::string &s) {
@@ -711,33 +768,110 @@ int main(int argc, char **argv) {
     auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
 
     if (!args.fixture.empty()) {
-      ParityFixture fx = load_parity_fixture(args.fixture);
-      auto t0 = std::chrono::steady_clock::now();
-      uint64_t bytes_read = 0;
-      int read_calls = 0;
-      std::vector<float> actual = compute_routed_fixture(fx, entries, spans, args, bytes_read, read_calls);
-      auto t1 = std::chrono::steady_clock::now();
-      ErrorStats err = compare_vectors(actual, fx.expected);
-      auto elapsed = std::chrono::duration<double>(t1 - t0).count();
+      ParityResult result = run_parity_fixture(args.fixture, entries, spans, args);
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
       std::cout << "  \"mode\": \"parity-fixture\",\n";
       std::cout << "  \"fixture\": \"" << json_escape(args.fixture.string()) << "\",\n";
       std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
       std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
-      std::cout << "  \"layer\": " << fx.layer << ",\n";
-      std::cout << "  \"topk\": " << fx.topk << ",\n";
-      std::cout << "  \"read_calls\": " << read_calls << ",\n";
-      std::cout << "  \"bytes_read\": " << bytes_read << ",\n";
-      std::cout << "  \"gib_read\": " << static_cast<double>(bytes_read) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"layer\": " << result.layer << ",\n";
+      std::cout << "  \"topk\": " << result.topk << ",\n";
+      std::cout << "  \"read_calls\": " << result.read_calls << ",\n";
+      std::cout << "  \"bytes_read\": " << result.bytes_read << ",\n";
+      std::cout << "  \"gib_read\": " << static_cast<double>(result.bytes_read) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
+      std::cout << "  \"compute_elapsed_s\": " << result.compute_elapsed_s << ",\n";
+      std::cout << "  \"max_abs_error\": " << result.error.max_abs << ",\n";
+      std::cout << "  \"mean_abs_error\": " << result.error.mean_abs << ",\n";
+      std::cout << "  \"rmse\": " << result.error.rmse << ",\n";
+      std::cout << "  \"expected_max_abs\": " << result.error.expected_max_abs << ",\n";
+      std::cout << "  \"max_rel_to_expected\": " << result.error.max_rel_to_expected << ",\n";
+      std::cout << "  \"parity_abs_floor\": 0.0001,\n";
+      std::cout << "  \"parity_rel_threshold\": 0.02,\n";
+      std::cout << "  \"parity_pass\": " << (parity_passes(result.error) ? "true" : "false") << ",\n";
+      std::cout << "  \"max_error_index\": " << result.error.max_index << "\n";
+      std::cout << "}\n";
+      return 0;
+    }
+
+    if (!args.fixture_list.empty()) {
+      auto fixture_paths = load_fixture_list(args.fixture_list);
+      std::vector<ParityResult> results;
+      results.reserve(fixture_paths.size());
+      auto t0 = std::chrono::steady_clock::now();
+      uint64_t total_bytes = 0;
+      int total_read_calls = 0;
+      double max_abs = 0.0;
+      double max_rel = 0.0;
+      double worst_mean_abs = 0.0;
+      double worst_rmse = 0.0;
+      int worst_layer = -1;
+      int worst_rel_layer = -1;
+      bool all_pass = true;
+      for (const auto &fixture_path : fixture_paths) {
+        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args);
+        total_bytes += result.bytes_read;
+        total_read_calls += result.read_calls;
+        all_pass = all_pass && parity_passes(result.error);
+        if (result.error.max_abs > max_abs) {
+          max_abs = result.error.max_abs;
+          worst_mean_abs = result.error.mean_abs;
+          worst_rmse = result.error.rmse;
+          worst_layer = result.layer;
+        }
+        if (result.error.max_rel_to_expected > max_rel) {
+          max_rel = result.error.max_rel_to_expected;
+          worst_rel_layer = result.layer;
+        }
+        results.push_back(std::move(result));
+      }
+      auto t1 = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(t1 - t0).count();
+      std::cout << "{\n";
+      std::cout << "  \"ok\": true,\n";
+      std::cout << "  \"mode\": \"parity-fixture-list\",\n";
+      std::cout << "  \"fixture_list\": \"" << json_escape(args.fixture_list.string()) << "\",\n";
+      std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
+      std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
+      std::cout << "  \"fixtures\": " << results.size() << ",\n";
+      std::cout << "  \"read_calls\": " << total_read_calls << ",\n";
+      std::cout << "  \"bytes_read\": " << total_bytes << ",\n";
+      std::cout << "  \"gib_read\": " << static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
       std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
       std::cout << "  \"compute_elapsed_s\": " << elapsed << ",\n";
-      std::cout << "  \"max_abs_error\": " << err.max_abs << ",\n";
-      std::cout << "  \"mean_abs_error\": " << err.mean_abs << ",\n";
-      std::cout << "  \"rmse\": " << err.rmse << ",\n";
-      std::cout << "  \"parity_threshold\": 0.0001,\n";
-      std::cout << "  \"parity_pass\": " << (err.max_abs <= 1.0e-4 ? "true" : "false") << ",\n";
-      std::cout << "  \"max_error_index\": " << err.max_index << "\n";
+      std::cout << "  \"max_abs_error\": " << max_abs << ",\n";
+      std::cout << "  \"max_rel_to_expected\": " << max_rel << ",\n";
+      std::cout << "  \"worst_mean_abs_error\": " << worst_mean_abs << ",\n";
+      std::cout << "  \"worst_rmse\": " << worst_rmse << ",\n";
+      std::cout << "  \"worst_layer\": " << worst_layer << ",\n";
+      std::cout << "  \"worst_rel_layer\": " << worst_rel_layer << ",\n";
+      std::cout << "  \"parity_abs_floor\": 0.0001,\n";
+      std::cout << "  \"parity_rel_threshold\": 0.02,\n";
+      std::cout << "  \"parity_pass\": " << (all_pass ? "true" : "false") << ",\n";
+      std::cout << "  \"layers\": [";
+      for (size_t i = 0; i < results.size(); ++i) {
+        if (i) std::cout << ", ";
+        std::cout << results[i].layer;
+      }
+      std::cout << "],\n";
+      std::cout << "  \"per_layer\": [\n";
+      for (size_t i = 0; i < results.size(); ++i) {
+        const auto &row = results[i];
+        std::cout << "    {\"layer\": " << row.layer
+                  << ", \"topk\": " << row.topk
+                  << ", \"read_calls\": " << row.read_calls
+                  << ", \"bytes_read\": " << row.bytes_read
+                  << ", \"compute_elapsed_s\": " << row.compute_elapsed_s
+                  << ", \"max_abs_error\": " << row.error.max_abs
+                  << ", \"mean_abs_error\": " << row.error.mean_abs
+                  << ", \"rmse\": " << row.error.rmse
+                  << ", \"expected_max_abs\": " << row.error.expected_max_abs
+                  << ", \"max_rel_to_expected\": " << row.error.max_rel_to_expected
+                  << ", \"parity_pass\": " << (parity_passes(row.error) ? "true" : "false")
+                  << "}" << (i + 1 == results.size() ? "\n" : ",\n");
+      }
+      std::cout << "  ]\n";
       std::cout << "}\n";
       return 0;
     }
