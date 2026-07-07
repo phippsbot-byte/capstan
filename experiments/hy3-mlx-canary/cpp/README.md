@@ -169,8 +169,15 @@ routed outputs for each MoE layer:
   --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
   --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
   --fixture-list /Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/<run>/fixtures.txt \
-  --layer-major
+  --route-exec
 ```
+
+`--route-exec` is the honest prompt/routed-MoE execution path: it requires the
+rich parity fixture list because the older route TSV only has expert IDs, not the
+hidden activations, route weights, or expected routed outputs needed for math.
+It implies layer-major dense q4 execution, preserves token/top-k accumulation
+order, and reports prompt-level totals (`token_layer_events`, `selected_routes`,
+unique reads/bytes, parity). Use the TSV `--trace` path only for cache/IO replay.
 
 Prefill4 artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/`.
 The split C++ substrate replayed **79** fixtures with `seq_len=4`, read
