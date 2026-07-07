@@ -199,17 +199,20 @@ RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::v
       }
     }
   } else {
+    std::unordered_map<int, ExpertBank> banks;
+    banks.reserve(unique_experts.size());
     for (int expert : unique_experts) {
       ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, expert);
       result.bytes_read += bank.raw.size();
       ++result.read_calls;
-      for (int token = 0; token < fx.seq_len; ++token) {
-        std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
-        for (int k = 0; k < fx.topk; ++k) {
-          size_t route = static_cast<size_t>(token * fx.topk + k);
-          if (fx.experts_flat[route] != expert) continue;
-          apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down);
-        }
+      banks.emplace(expert, std::move(bank));
+    }
+    for (int token = 0; token < fx.seq_len; ++token) {
+      std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
+      for (int k = 0; k < fx.topk; ++k) {
+        size_t route = static_cast<size_t>(token * fx.topk + k);
+        const ExpertBank &bank = banks.at(fx.experts_flat[route]);
+        apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down);
       }
     }
   }

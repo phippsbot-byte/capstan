@@ -188,5 +188,5 @@ Python/MLX exported **79** fixtures with `seq_len=16`, sidecar read **29.752075G
 forward-to-layer wall **97.636s**, and swap delta **0.0GiB**. Full C++ layer-major
 replay passed all 79 layers with **3,009** unique reads vs **6,320** naïve route
 reads, saving **3,311** reads / **32.7382GiB**; worst relative-to-expected error
-was `0.0157926`. Scalar qlinear wall was **891.59s**, so the next compute cut is
+was `0.0157926`. Scalar qlinear wall was **899.48s**, so the next compute cut is
 SIMD/Metal, not more replay plumbing.
