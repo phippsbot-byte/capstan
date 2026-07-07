@@ -155,6 +155,24 @@ def load_lazy_model(eval_params: bool = True):
     return model, mod, config, {"resident_tensors": len(weights), "load_weight_s": load_weight_s}
 
 
+def reset_route_trace_if_requested(args: argparse.Namespace, mod: Any) -> None:
+    if getattr(args, "trace_routes", False) and hasattr(mod, "reset_route_trace"):
+        mod.reset_route_trace()
+
+
+def attach_route_trace(args: argparse.Namespace, mod: Any, result: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    if not getattr(args, "trace_routes", False):
+        return result
+    if not hasattr(mod, "get_route_trace_stats"):
+        result["route_trace"] = {"enabled": False, "error": "lazy module has no route trace helpers"}
+        return result
+    stats = dict(mod.get_route_trace_stats())
+    if getattr(args, "route_trace_out", None) and hasattr(mod, "write_route_trace_tsv"):
+        stats["path"] = mod.write_route_trace_tsv(str(args.route_trace_out), metadata=metadata)
+    result["route_trace"] = stats
+    return result
+
+
 def mode_expert_read(args) -> dict[str, Any]:
     os.environ.setdefault("HY3_SIDECAR_LAYOUT", str(LAYOUT_PATH))
     os.environ["HY3_SLOT_BANK"] = str(args.slot_bank)
@@ -245,6 +263,7 @@ def mode_forward_one(args) -> dict[str, Any]:
     os.environ["HY3_SLOT_BANK"] = str(args.slot_bank)
     t0 = time.time()
     model, mod, config, meta = load_lazy_model(eval_params=True)
+    reset_route_trace_if_requested(args, mod)
     load_s = time.time() - t0
     token_id = int(args.token_id if args.token_id is not None else config.get("bos_token_id", 120000))
     ids = mx.array([[token_id]], dtype=mx.int32)
@@ -255,7 +274,7 @@ def mode_forward_one(args) -> dict[str, Any]:
     mx.eval(logits)
     forward_s = time.time() - t1
     next_id = int(mx.argmax(logits[:, -1, :], axis=-1).item())
-    return {
+    result = {
         "ok": True,
         "mode": "forward-one",
         "token_id": token_id,
@@ -269,6 +288,7 @@ def mode_forward_one(args) -> dict[str, Any]:
         "sidecar_store": mod.get_sidecar_store().stats(),
         "profile": mod.get_profile_stats() if getattr(args, "profile_layers", False) and hasattr(mod, "get_profile_stats") else None,
     }
+    return attach_route_trace(args, mod, result, {"mode": "forward-one", "token_id": token_id, "topk_cap": getattr(args, "topk_cap", None)})
 
 
 def mode_generate_raw(args) -> dict[str, Any]:
@@ -280,6 +300,7 @@ def mode_generate_raw(args) -> dict[str, Any]:
     prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
     t0 = time.time()
     model, mod, config, meta = load_lazy_model(eval_params=True)
+    reset_route_trace_if_requested(args, mod)
     load_s = time.time() - t0
 
     ids = list(prompt_ids)
@@ -298,7 +319,7 @@ def mode_generate_raw(args) -> dict[str, Any]:
             break
     text = tokenizer.decode(generated, skip_special_tokens=False)
     clean_text = tokenizer.decode(generated, skip_special_tokens=True)
-    return {
+    result = {
         "ok": True,
         "mode": "generate-raw",
         "prompt": args.prompt,
@@ -313,6 +334,12 @@ def mode_generate_raw(args) -> dict[str, Any]:
         "resident_tensors": meta["resident_tensors"],
         "sidecar_store": mod.get_sidecar_store().stats(),
     }
+    return attach_route_trace(
+        args,
+        mod,
+        result,
+        {"mode": "generate-raw", "prompt_tokens": len(prompt_ids), "max_new_tokens": args.max_new_tokens, "topk_cap": getattr(args, "topk_cap", None)},
+    )
 
 
 def mode_generate_cache(args) -> dict[str, Any]:
@@ -325,6 +352,7 @@ def mode_generate_cache(args) -> dict[str, Any]:
     prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
     t0 = time.time()
     model, mod, config, meta = load_lazy_model(eval_params=True)
+    reset_route_trace_if_requested(args, mod)
     load_s = time.time() - t0
 
     cache = make_prompt_cache(model)
@@ -348,7 +376,7 @@ def mode_generate_cache(args) -> dict[str, Any]:
 
     text = tokenizer.decode(generated, skip_special_tokens=False)
     clean_text = tokenizer.decode(generated, skip_special_tokens=True)
-    return {
+    result = {
         "ok": True,
         "mode": "generate-cache",
         "prompt": args.prompt,
@@ -363,6 +391,12 @@ def mode_generate_cache(args) -> dict[str, Any]:
         "resident_tensors": meta["resident_tensors"],
         "sidecar_store": mod.get_sidecar_store().stats(),
     }
+    return attach_route_trace(
+        args,
+        mod,
+        result,
+        {"mode": "generate-cache", "prompt_tokens": len(prompt_ids), "max_new_tokens": args.max_new_tokens, "topk_cap": getattr(args, "topk_cap", None)},
+    )
 
 
 def main() -> None:
@@ -383,7 +417,11 @@ def main() -> None:
     parser.add_argument("--sync-timers", action="store_true", help="call mx.synchronize() after timed evals for honest MLX timing")
     parser.add_argument("--retain-policy", choices=["id", "freq", "last", "freq-last", "last-freq"], help="expert cache retention policy after prompt prefill")
     parser.add_argument("--topk-cap", type=int, help="experimental cap for routed experts per token; default uses model top-k")
+    parser.add_argument("--trace-routes", action="store_true", help="record real router-selected expert ids for C++ scheduler replay")
+    parser.add_argument("--route-trace-out", type=Path, help="write route trace TSV for C++ --trace replay")
     args = parser.parse_args()
+    if args.route_trace_out:
+        args.trace_routes = True
 
     if args.profile_layers:
         os.environ["HY3_PROFILE_LAYERS"] = "1"
@@ -397,6 +435,8 @@ def main() -> None:
         os.environ["HY3_RETAIN_POLICY"] = args.retain_policy.replace("-", "_")
     if args.topk_cap is not None:
         os.environ["HY3_TOPK_CAP"] = str(args.topk_cap)
+    if args.trace_routes:
+        os.environ["HY3_TRACE_ROUTES"] = "1"
 
     guard = start_swap_guard(args.max_swap_gib, args.max_swap_delta_gib)
     result: dict[str, Any]

@@ -43,6 +43,7 @@ struct Span {
 struct Args {
   fs::path index;
   fs::path root;
+  fs::path trace;
   std::optional<int> layer;
   std::vector<int> explicit_layers;
   std::vector<int> experts;
@@ -85,7 +86,7 @@ static std::vector<int> parse_layers(const std::string &s) {
 
 static void usage() {
   std::cerr << "usage: hy3_sidecar_io --index compact-index.tsv --root sidecar-root "
-               "(--layer N --experts a,b,c | --layers A-B --topk K) "
+               "(--trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
                "[--simulate-tokens N --slot-bank N --policy lru|freq --route-pattern fixed|hot|rolling] "
                "[--iterations N] [--checksum sample|full|none] [--no-read]\n";
 }
@@ -100,6 +101,7 @@ static Args parse_args(int argc, char **argv) {
     };
     if (key == "--index") args.index = need_value("--index");
     else if (key == "--root") args.root = need_value("--root");
+    else if (key == "--trace") args.trace = need_value("--trace");
     else if (key == "--layer") args.layer = std::stoi(need_value("--layer"));
     else if (key == "--layers") args.explicit_layers = parse_layers(need_value("--layers"));
     else if (key == "--experts") args.experts = parse_csv_ints(need_value("--experts"));
@@ -131,6 +133,12 @@ static Args parse_args(int argc, char **argv) {
   }
   if (args.simulate_tokens > 0 && args.slot_bank < 1) {
     throw std::runtime_error("--simulate-tokens requires --slot-bank >= 1");
+  }
+  if (!args.trace.empty() && args.slot_bank < 1) {
+    throw std::runtime_error("--trace requires --slot-bank >= 1");
+  }
+  if (!args.trace.empty()) {
+    return args;
   }
   if (args.layer.has_value()) {
     if (args.experts.empty()) throw std::runtime_error("--layer requires --experts");
@@ -356,6 +364,51 @@ static uint64_t cache_bytes(const std::unordered_map<int, std::unordered_map<int
   return total;
 }
 
+struct TraceEvent {
+  uint64_t event = 0;
+  int layer = 0;
+  int batch = 0;
+  int token = 0;
+  std::vector<int> experts;
+};
+
+static std::vector<TraceEvent> load_trace_events(const fs::path &trace_path) {
+  FILE *f = std::fopen(trace_path.c_str(), "r");
+  if (!f) throw std::runtime_error("failed to open trace: " + trace_path.string() + ": " + std::strerror(errno));
+  char *line = nullptr;
+  size_t cap = 0;
+  std::vector<TraceEvent> events;
+  while (getline(&line, &cap, f) != -1) {
+    std::string s(line);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    if (s.empty() || s[0] == '#') continue;
+    if (s.rfind("event\t", 0) == 0) continue;
+    auto cols = split(s, '\t');
+    if (cols.size() != 5) {
+      std::free(line);
+      std::fclose(f);
+      throw std::runtime_error("bad route trace row with " + std::to_string(cols.size()) + " cols");
+    }
+    TraceEvent event;
+    event.event = std::stoull(cols[0]);
+    event.layer = std::stoi(cols[1]);
+    event.batch = std::stoi(cols[2]);
+    event.token = std::stoi(cols[3]);
+    event.experts = parse_csv_ints(cols[4]);
+    if (event.experts.empty()) {
+      std::free(line);
+      std::fclose(f);
+      throw std::runtime_error("route trace row has empty experts list");
+    }
+    events.push_back(std::move(event));
+  }
+  std::free(line);
+  std::fclose(f);
+  if (events.empty()) throw std::runtime_error("route trace has no events");
+  std::sort(events.begin(), events.end(), [](const TraceEvent &a, const TraceEvent &b) { return a.event < b.event; });
+  return events;
+}
+
 static std::string json_escape(const std::string &s) {
   std::string out;
   for (char c : s) {
@@ -395,6 +448,67 @@ int main(int argc, char **argv) {
     for (const auto &s : plan) planned_bytes += s.nbytes;
 
     auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
+
+    if (!args.trace.empty()) {
+      auto events = load_trace_events(args.trace);
+      FdCache fds(args.root);
+      std::vector<uint8_t> buf;
+      std::unordered_map<int, std::unordered_map<int, CacheEntry>> cache;
+      std::unordered_set<int> trace_layers;
+      RunStats stats;
+      uint64_t tick = 0;
+      uint64_t selections = 0;
+      size_t max_k = 0;
+      auto t_read0 = std::chrono::steady_clock::now();
+      for (int iter = 0; iter < args.iterations; ++iter) {
+        for (const auto &event : events) {
+          trace_layers.insert(event.layer);
+          max_k = std::max(max_k, event.experts.size());
+          selections += event.experts.size();
+          for (int expert : event.experts) {
+            auto it = spans.find(span_key(event.layer, expert));
+            if (it == spans.end()) throw std::runtime_error("missing span for trace layer/expert");
+            touch_or_load(it->second, args, fds, buf, cache, ++tick, stats);
+          }
+        }
+      }
+      auto t_read1 = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration<double>(t_read1 - t_read0).count();
+      double gib = static_cast<double>(stats.bytes_read) / (1024.0 * 1024.0 * 1024.0);
+      double gib_s = elapsed > 0.0 ? gib / elapsed : 0.0;
+      uint64_t final_cache_bytes = cache_bytes(cache);
+      std::cout << "{\n";
+      std::cout << "  \"ok\": true,\n";
+      std::cout << "  \"mode\": \"route-trace\",\n";
+      std::cout << "  \"trace\": \"" << json_escape(args.trace.string()) << "\",\n";
+      std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
+      std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
+      std::cout << "  \"index_entries\": " << entries.size() << ",\n";
+      std::cout << "  \"expert_spans\": " << spans.size() << ",\n";
+      std::cout << "  \"events\": " << events.size() << ",\n";
+      std::cout << "  \"layers\": " << trace_layers.size() << ",\n";
+      std::cout << "  \"selected_experts\": " << selections << ",\n";
+      std::cout << "  \"max_k\": " << max_k << ",\n";
+      std::cout << "  \"slot_bank\": " << args.slot_bank << ",\n";
+      std::cout << "  \"policy\": \"" << json_escape(args.policy) << "\",\n";
+      std::cout << "  \"iterations\": " << args.iterations << ",\n";
+      std::cout << "  \"cache_hits\": " << stats.cache_hits << ",\n";
+      std::cout << "  \"cache_misses\": " << stats.cache_misses << ",\n";
+      std::cout << "  \"evictions\": " << stats.evictions << ",\n";
+      std::cout << "  \"read_calls\": " << stats.read_calls << ",\n";
+      std::cout << "  \"bytes_read\": " << stats.bytes_read << ",\n";
+      std::cout << "  \"gib_read\": " << gib << ",\n";
+      std::cout << "  \"final_cache_bytes\": " << final_cache_bytes << ",\n";
+      std::cout << "  \"final_cache_gib\": " << static_cast<double>(final_cache_bytes) / (1024.0 * 1024.0 * 1024.0) << ",\n";
+      std::cout << "  \"index_load_s\": " << index_elapsed << ",\n";
+      std::cout << "  \"read_elapsed_s\": " << elapsed << ",\n";
+      std::cout << "  \"gib_per_s\": " << gib_s << ",\n";
+      std::cout << "  \"checksum_fnv1a64\": \"0x" << std::hex << stats.checksum << std::dec << "\",\n";
+      std::cout << "  \"checksum_mode\": \"" << json_escape(args.checksum) << "\",\n";
+      std::cout << "  \"no_read\": " << (args.no_read ? "true" : "false") << "\n";
+      std::cout << "}\n";
+      return 0;
+    }
 
     if (args.simulate_tokens > 0) {
       FdCache fds(args.root);

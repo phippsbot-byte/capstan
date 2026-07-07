@@ -304,7 +304,19 @@ Native slot-bank/cache scheduling is now implemented in the same C++ substrate v
 | top5 hot, 8 tokens, slot16 | 2,370 | 790 | 0 | 7.811GiB | 3.683s | 7.811GiB |
 | top5 rolling, 8 tokens, slot16 | 0 | 3,160 | 1,896 | 31.245GiB | 13.029s | 12.498GiB |
 
-Interpretation: native scheduling matches the Python lesson. If routing has locality, slot-bank 16 is enough to keep repeated expert sets hot; if routing churns adversarially, IO explodes even before compute. Next C++ step: consume real router traces / wire layer-major prefill-decode kernels and stop using Python/MLX request glue as the product path.
+Interpretation: native scheduling matches the Python lesson. If routing has locality, slot-bank 16 is enough to keep repeated expert sets hot; if routing churns adversarially, IO explodes even before compute.
+
+Real router trace capture/replay is now implemented:
+
+- Python trace source: `hy3_lazy_smoke.py --route-trace-out`, backed by `HY3_TRACE_ROUTES=1` in `hy_v3_mlx_lazy.py`.
+- C++ replay: `hy3_sidecar_io --trace <route.tsv> --slot-bank 16 --policy freq`.
+- Artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/20260707-102115/`.
+
+| Real trace | Events | Selected experts | Hits | Misses | Evictions | Payload read | Read wall | Final cache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| top5/slot16 `generate-cache`, prompt `Reply with exactly pong.`, 3 generated-token attempts | 632 | 3,160 | 1,051 | 2,109 | 845 | 20.853GiB | 6.648s | 12.498GiB |
+
+Python live run for the same trace read **20.873GiB** and took **50.639s / 2.665s / 2.658s** across prefill/decode steps. C++ replay is not doing compute, but it now gives an apples-ish native IO/cache pressure model for real router decisions. Next C++ step: wire layer-major prefill/decode kernels against this trace path and stop using Python/MLX request glue as the product path.
 
 ## DS4 lane cleanup
 

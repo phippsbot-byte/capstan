@@ -248,6 +248,20 @@ class Hy3SidecarStore:
         self.pack_time_s += time.time() - t_pack
         return packed
 
+    def clear_cached_experts(self) -> dict[str, Any]:
+        cached = sum(len(v) for v in self.cache.values())
+        layers = len(self.cache)
+        self.cache.clear()
+        t_gc = time.time()
+        gc.collect()
+        if hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+        if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+            mx.metal.clear_cache()
+        self.gc_calls += 1
+        self.gc_time_s += time.time() - t_gc
+        return {"cleared_experts": cached, "cleared_layers": layers, "gc_s": round(time.time() - t_gc, 3)}
+
     def stats(self) -> dict[str, Any]:
         cached = sum(len(v) for v in self.cache.values())
         return {
@@ -275,6 +289,8 @@ class Hy3SidecarStore:
 
 _STORE: Hy3SidecarStore | None = None
 _PROFILE: list[dict[str, Any]] = []
+_ROUTE_TRACE: list[dict[str, Any]] = []
+_ROUTE_EVENT = 0
 _MOE_TIMES: dict[str, float] = {
     "router_s": 0.0,
     "selection_s": 0.0,
@@ -290,6 +306,70 @@ def env_truthy(name: str) -> bool:
 
 def profile_enabled() -> bool:
     return env_truthy("HY3_PROFILE_LAYERS")
+
+
+def route_trace_enabled() -> bool:
+    return env_truthy("HY3_TRACE_ROUTES")
+
+
+def record_route_trace(layer: int, indices: mx.array) -> None:
+    global _ROUTE_EVENT
+    if not route_trace_enabled():
+        return
+    mx.eval(indices)
+    idx_np = np.array(indices, copy=False)
+    if idx_np.ndim != 3:
+        idx_np = idx_np.reshape(1, -1, idx_np.shape[-1])
+    batch, tokens, _ = idx_np.shape
+    for b in range(batch):
+        for token in range(tokens):
+            _ROUTE_TRACE.append(
+                {
+                    "event": _ROUTE_EVENT,
+                    "layer": int(layer),
+                    "batch": int(b),
+                    "token": int(token),
+                    "experts": [int(x) for x in idx_np[b, token].tolist()],
+                }
+            )
+            _ROUTE_EVENT += 1
+
+
+def reset_route_trace() -> None:
+    global _ROUTE_EVENT
+    _ROUTE_TRACE.clear()
+    _ROUTE_EVENT = 0
+
+
+def get_route_trace_stats() -> dict[str, Any]:
+    layers = sorted({int(row["layer"]) for row in _ROUTE_TRACE})
+    total_selected = sum(len(row["experts"]) for row in _ROUTE_TRACE)
+    return {
+        "enabled": route_trace_enabled(),
+        "events": len(_ROUTE_TRACE),
+        "layers": len(layers),
+        "first_layer": layers[0] if layers else None,
+        "last_layer": layers[-1] if layers else None,
+        "total_selected": total_selected,
+        "avg_k": round(total_selected / len(_ROUTE_TRACE), 3) if _ROUTE_TRACE else 0.0,
+    }
+
+
+def write_route_trace_tsv(path: str | os.PathLike[str], metadata: Optional[dict[str, Any]] = None) -> str:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as handle:
+        handle.write("# schema=hy3-route-trace-v1\n")
+        if metadata:
+            handle.write("# metadata=" + json.dumps(metadata, sort_keys=True) + "\n")
+        handle.write("event\tlayer\tbatch\ttoken\texperts\n")
+        for row in _ROUTE_TRACE:
+            handle.write(
+                f"{row['event']}\t{row['layer']}\t{row['batch']}\t{row['token']}\t"
+                + ",".join(str(x) for x in row["experts"])
+                + "\n"
+            )
+    return str(out)
 
 
 def shared_mlp_disabled() -> bool:
@@ -322,6 +402,7 @@ def eval_for_timing(*arrays: Any) -> None:
 
 def reset_profile() -> None:
     _PROFILE.clear()
+    reset_route_trace()
     for key in _MOE_TIMES:
         _MOE_TIMES[key] = 0.0
 
@@ -565,6 +646,7 @@ class Hy3MoE(nn.Module):
 
             k = effective_top_k(self.top_k)
             inds = mx.stop_gradient(mx.argpartition(-selection_scores, kth=k - 1, axis=-1)[..., :k])
+            record_route_trace(self.layer_idx, inds)
             selected_scores = mx.take_along_axis(scores, inds, axis=-1)
             if self.route_norm and k > 1:
                 selected_scores = selected_scores / selected_scores.sum(axis=-1, keepdims=True)
@@ -591,6 +673,7 @@ class Hy3MoE(nn.Module):
             selection_scores = selection_scores + self.router.expert_bias
         k = effective_top_k(self.top_k)
         inds = mx.stop_gradient(mx.argpartition(-selection_scores, kth=k - 1, axis=-1)[..., :k])
+        record_route_trace(self.layer_idx, inds)
         selected_scores = mx.take_along_axis(scores, inds, axis=-1)
         if self.route_norm and k > 1:
             selected_scores = selected_scores / selected_scores.sum(axis=-1, keepdims=True)

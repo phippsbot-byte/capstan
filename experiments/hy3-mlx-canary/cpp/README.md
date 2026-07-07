@@ -79,3 +79,25 @@ Adversarial rolling trace — churns through more experts than slot-bank 16 can 
 ```
 
 Current benchmark artifact: `cpp/results/20260707-sidecar-io.json`.
+
+## Real router trace replay
+
+`hy3_lazy_smoke.py` can now capture real router-selected experts from the Python
+prototype and write a TSV trace that C++ can replay:
+
+```bash
+HY3_SIDECAR_LAYOUT=/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json \
+/opt/homebrew/bin/python3.11 hy3_lazy_smoke.py generate-cache \
+  --slot-bank 16 --retain-policy freq --topk-cap 5 \
+  --prompt 'Reply with exactly pong.' --max-new-tokens 1 \
+  --route-trace-out /Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/<run>/top5-slot16-pong-trace.tsv
+
+./build/hy3-sidecar-io/hy3_sidecar_io \
+  --index /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv \
+  --root /Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar \
+  --trace /Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/<run>/top5-slot16-pong-trace.tsv \
+  --slot-bank 16 --policy freq
+```
+
+First real trace artifact:
+`/Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/20260707-102115/`.
