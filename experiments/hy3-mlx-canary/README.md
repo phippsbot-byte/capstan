@@ -29,7 +29,8 @@ After removing explicit per-expert `gc.collect()` from the hot path:
 
 - packed one-token forward: ~3.5s, 0.0GiB swap delta
 - packed KV-cache `pong`: clean exact `pong`
-- `pong` timings: ~17.5s / 3.5s / 2.1s
-- sidecar reads for `pong`: ~47.6GiB, 4815 reads, slot-bank 8
+- slot-bank 16 `pong`: ~15.4s / 1.8s / 1.2s, 0.0GiB swap delta
+- slot-bank 18+ currently swap-bombs under guarded runs
+- current safe cache ceiling: slot-bank 16
 
-Next useful work: slot-bank sweep and layer-major prefill dedup/reuse.
+Next useful work: layer-major prefill dedup/reuse at slot-bank 16.

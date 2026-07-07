@@ -226,6 +226,19 @@ Routed microbench / GC fix result:
 
 Corrected final read: the Python prototype was being murdered by explicit Python GC, not by `gather_qmm`, not by weighting/sum, not by shared MLP, and not by SSD bandwidth. Next useful optimization is reducing sidecar loads/reads for prefill via layer-major expert reuse/prefetch and larger/ smarter slot policy, because post-fix single-token decode is now in the ~3.5s range instead of ~80s.
 
+Slot-bank sweep result:
+
+| Slot bank | Result |
+|---:|---|
+| 8 | exact `pong`; timings **17.509s / 3.478s / 2.097s**; reads **47.609GiB**; evictions **4183**; swap delta **0.0GiB** |
+| 16 | exact `pong`; timings **15.439s / 1.779s / 1.162s**; reads **45.592GiB**; evictions **3347**; swap delta **0.0GiB** |
+| 18 | killed by swap guard; swap climbed **3.135 → 12.261GiB** with 8GiB delta gate |
+| 20 | killed by swap guard; swap climbed **3.173 → 15.396GiB** with 12GiB delta gate |
+| 24 | killed by swap guard; swap climbed **2.774 → 19.305GiB** with 16GiB delta gate |
+| 32 | killed by swap guard; swap climbed **1.962 → 26.069GiB** with 24GiB delta gate |
+
+Operational read: slot-bank **16** is the current safe ceiling on the 96GB Studio. It halves decode-ish steps vs slot 8 and stays flat on swap. Slot 18+ causes memory pressure/swap fast; do not use 24/32 without a smarter cache/offload strategy. Next target is layer-major prefill dedup/reuse at slot 16, not brute-force bigger caches.
+
 ## Next engineering step
 
 Do **not** rerun flat MLX.
