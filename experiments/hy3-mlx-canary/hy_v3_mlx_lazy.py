@@ -447,7 +447,15 @@ class LazySwitchGLU(nn.Module):
     def _remap_indices(self, indices: mx.array) -> tuple[list[int], mx.array]:
         mx.eval(indices)
         idx_np = np.array(indices, copy=False)
-        unique = sorted(int(x) for x in np.unique(idx_np))
+        values, counts = np.unique(idx_np, return_counts=True)
+        pairs = [(int(value), int(count)) for value, count in zip(values, counts)]
+        # Load least-frequent experts first so a bounded LRU retains the most
+        # reused prompt experts after the layer finishes. Set
+        # HY3_RETAIN_FREQUENT_EXPERTS=0 to fall back to stable expert-id order.
+        if os.environ.get("HY3_RETAIN_FREQUENT_EXPERTS", "1").lower() in {"0", "false", "no", "off"}:
+            unique = [expert_id for expert_id, _ in sorted(pairs)]
+        else:
+            unique = [expert_id for expert_id, _ in sorted(pairs, key=lambda item: (item[1], item[0]))]
         pos = {expert_id: i for i, expert_id in enumerate(unique)}
         remapped_np = np.vectorize(pos.__getitem__, otypes=[np.int32])(idx_np)
         return unique, mx.array(remapped_np, dtype=mx.int32)

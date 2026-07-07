@@ -239,6 +239,22 @@ Slot-bank sweep result:
 
 Operational read: slot-bank **16** is the current safe ceiling on the 96GB Studio. It halves decode-ish steps vs slot 8 and stays flat on swap. Slot 18+ causes memory pressure/swap fast; do not use 24/32 without a smarter cache/offload strategy. Next target is layer-major prefill dedup/reuse at slot 16, not brute-force bigger caches.
 
+Frequency-retention cache policy:
+
+Changed `LazySwitchGLU._remap_indices` to load least-frequent prompt experts first so the bounded per-layer LRU retains the most reused experts after prefill. `HY3_RETAIN_FREQUENT_EXPERTS=0` restores old expert-id ordering.
+
+Slot-bank 16 with frequency retention:
+- exact `pong`: true
+- timings: **14.757s / 1.072s / 1.141s**
+- loads: **4412** (down from 4611)
+- hits: **559** (up from 360)
+- evictions: **3148** (down from 3347)
+- reads: **43.625GiB** (down from 45.592GiB)
+- swap delta: **0.0GiB**
+- artifact: `/Volumes/ModelSSD/logs/hy3-mlx-canary/packed-generate-cache-chatlite-gcfix-slot16-freqretain.json`
+
+This is a cheap win and keeps slot 16 as the default safe policy. Next optimization should target prefill read volume directly, but cache retention order now stops throwing away the most useful prompt experts.
+
 ## Next engineering step
 
 Do **not** rerun flat MLX.
