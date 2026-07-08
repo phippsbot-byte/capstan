@@ -504,6 +504,25 @@ Review hardening after this cut preserves `slot_bank` as a hard post-pack cache 
 
 Artifacts: `results/20260707-packed-coalesced-loader-summary.json` plus per-run decode JSONs.
 
+## Route locality analyzer
+
+Added `hy3_route_locality.py`, a call-level analyzer for `hy3-route-trace-v1` TSV traces. It infers prefill/decode passes when layer order resets, groups rows into actual Python routed-layer calls, and simulates `Hy3SidecarStore` cache behavior after the post-pack hard-cap fix. This intentionally models unique expert loads per layer call, not the older C++ per-selection replay.
+
+Real trace analyzed: `/Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/20260707-102115/top5-slot16-pong-3tok-trace.tsv` (**632** events, **237** layer calls, **3** passes, **3,160** selected experts). Artifacts: `results/20260707-route-locality-top5-slot16.json` and `.md`.
+
+Best tested policy by simulated miss count:
+
+| Slot | Best policy | Misses | Hit rate | Read GiB | Evictions | Oversized calls | Final cache GiB |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 8 | `freq_last` | 2,146 | 0.151 | 21.219 | 1,514 | 79 | 6.249 |
+| 12 | `freq_last` | 2,110 | 0.166 | 20.863 | 1,162 | 79 | 9.374 |
+| 16 | `freq_last` | 2,091 | 0.173 | 20.675 | 827 | 76 | 12.498 |
+| 20 | `freq` | 2,073 | 0.180 | 20.497 | 498 | 51 | 15.573 |
+| 24 | `freq` | 2,060 | 0.185 | 20.369 | 230 | 22 | 18.094 |
+| 32 | `freq` | 2,053 | 0.188 | 20.299 | 6 | 0 | 20.240 |
+
+Verdict: cache policy is only a small lever on this trace. At slot16, `freq_last` beats current `freq` by **10** misses (~0.099GiB). Moving slot16→20 saves only **18** misses while adding ~**3.1GiB** final cache. Most churn is baked into route distribution, not LRU ordering. Next runtime experiment should test `HY3_RETAIN_POLICY=freq_last` once, but bigger slot banks are not worth the memory pressure until a kernel/compute path gets much faster.
+
 ## DS4 lane cleanup
 
 DeepSeek V4 Flash SSD lane was stopped before Hy3 runs and restored after each heavy test.

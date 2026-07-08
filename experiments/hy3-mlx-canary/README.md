@@ -24,6 +24,7 @@ This repo is **code + metadata only**. It intentionally does not contain model w
 | `hy3_sidecar_layout.py` | Metadata-only sidecar layout planner |
 | `run_hy3_phipps_slice.sh` | Tiny Phipps slice runner with DS4 restore trap |
 | `hy3_emit_compact_index.py` | Emits compact TSV sidecar index for native/C++ experiments |
+| `hy3_route_locality.py` | Analyzes Python route traces and simulates per-layer expert-cache policies |
 | `hy3_export_layer_fixture.py` | Exports compact Python/MLX routed-layer parity fixtures for native replay |
 | `cpp/` | Split C++20 sidecar substrate, real trace replay, all-layer parity, and layer-major prefill dedup replay |
 | `HY3-LAZY-SIDECAR-STATUS.md` | Running status and measured artifacts |
