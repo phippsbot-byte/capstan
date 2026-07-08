@@ -30,7 +30,7 @@ import numpy as np
 
 WORKDIR = Path(__file__).resolve().parent
 MODEL_DIR = Path("/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX")
-LAYOUT_PATH = WORKDIR / "hy3-sidecar-layout.json"
+LAYOUT_PATH = Path("/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json")
 LAZY_MODEL_FILE = WORKDIR / "hy_v3_mlx_lazy.py"
 
 

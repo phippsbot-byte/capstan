@@ -23,7 +23,7 @@ from mlx_lm.models.activations import swiglu
 from mlx_lm.models.base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 
 
-DEFAULT_LAYOUT = "/Users/nb/LLM/hy3-mlx-canary/hy3-sidecar-layout.json"
+DEFAULT_LAYOUT = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json"
 WORKDIR = Path(__file__).resolve().parent
 DEFAULT_CPP_ROUTE_DAEMON_BIN = str(WORKDIR / "build/hy3-sidecar-io/hy3_route_mlp_daemon")
 DEFAULT_CPP_ROUTE_INDEX = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv"

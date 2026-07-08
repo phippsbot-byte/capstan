@@ -1,0 +1,16 @@
+{
+  "artifact": "results/20260707-default-packed-generate-cache-topk1.json",
+  "comparison": "Earlier v0-layout topk1 generate-cache used 3834 tensor reads and [11.027, 5.128]s; packed default uses 426 span reads and [9.859, 4.485]s in this smoke.",
+  "load_time_s": 3.439,
+  "qmm_time_s": 1.096,
+  "read_calls": 426,
+  "read_gib": 4.212158,
+  "schema": "hy3-default-packed-sidecar-smoke-v1",
+  "sidecar_schema": "hy3-packed-sidecar-v1",
+  "step_timings_s": [
+    9.859,
+    4.485
+  ],
+  "swap_delta_gib": 0.0,
+  "verdict": "default_packed_manifest_enabled"
+}

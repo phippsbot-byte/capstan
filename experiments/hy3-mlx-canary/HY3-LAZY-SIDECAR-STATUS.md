@@ -482,6 +482,10 @@ Prefill16 export and full layer-major replay scaled the fixture shape to **79** 
 
 Interpretation: native code can now materialize selected expert banks from the packed sidecar, dequantize MLX q4 affine weights, run `up/gate/down + swiglu + route weighting`, and match Python/MLX across every routed layer for both single-token and short prefill-shaped fixtures. The executor now exposes the real layer-major accounting: selected routes vs unique expert loads, bytes saved, and per-layer parity. Late-layer absolute errors are large because the expected activation magnitudes are huge; the relative gate is the right ABI/math check here. Apple Accelerate and expert-major dense reuse remove ~73% of the scalar qlinear wall. The persistent C++ routed-MoE daemon plus `HY3_CPP_ROUTE_MLP=1` Python hook is functional and has a working dense expert cache, but online top-k1 canaries are slower than the MLX path (`forward-one` 9.53s vs 5.87s; two-token generate-cache [23.17s, 10.49s] vs [11.03s, 5.13s]). A simple MLX custom Metal q4 matvec spike is feasible but only parity/noisy against `gather_qmm`; treat the daemon as an IPC/correctness substrate unless/until we build a genuinely fused/route-batched Metal kernel.
 
+## Default packed Python lane
+
+`hy_v3_mlx_lazy.DEFAULT_LAYOUT` and `hy3_lazy_smoke.LAYOUT_PATH` now default to `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json` instead of the older v0 sidecar layout. The env override `HY3_SIDECAR_LAYOUT` still works. Top-k1 two-token `generate-cache` smoke with no layout env now reports `schema=hy3-packed-sidecar-v1`, **426** span reads / **4.212158GiB**, **[9.859s, 4.485s]** step timings, and **0.0GiB** swap delta. The old v0-layout comparison was **3,834** tensor reads and **[11.027s, 5.128s]**.
+
 ## DS4 lane cleanup
 
 DeepSeek V4 Flash SSD lane was stopped before Hy3 runs and restored after each heavy test.
