@@ -101,9 +101,12 @@ class Hy3SidecarStore:
         self.cache: dict[int, OrderedDict[int, dict[str, dict[str, mx.array]]]] = {}
         self._fd_cache: dict[Path, int] = {}
         self.packed_coalesce_max_bytes = self._env_gib_to_bytes("HY3_PACKED_COALESCE_MAX_GIB", 0.032)
-        self.packed_coalesce_max_overread_ratio = self._env_float("HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO", 2.0)
-        if self.packed_coalesce_max_overread_ratio < 1.0:
-            raise ValueError("HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO must be >= 1.0")
+        if self.packed_coalesce_max_bytes > 0:
+            self.packed_coalesce_max_overread_ratio = self._env_float("HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO", 2.0)
+            if self.packed_coalesce_max_overread_ratio < 1.0:
+                raise ValueError("HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO must be >= 1.0")
+        else:
+            self.packed_coalesce_max_overread_ratio = 0.0
         self.loads = 0
         self.hits = 0
         self.evictions = 0
@@ -113,8 +116,10 @@ class Hy3SidecarStore:
         self.requested_unique_total = 0
         self.requested_unique_max = 0
         self.packed_batch_loads = 0
-        self.packed_coalesced_groups = 0
-        self.packed_coalesced_experts = 0
+        self.packed_read_groups = 0
+        self.packed_read_experts = 0
+        self.packed_multi_expert_groups = 0
+        self.packed_multi_expert_experts = 0
         self.packed_coalesced_extra_bytes = 0
         self.load_time_s = 0.0
         self.pack_time_s = 0.0
@@ -254,8 +259,11 @@ class Hy3SidecarStore:
                 experts = [int(r["expert"]) for r in group]
                 raise IOError(f"short packed coalesced read for L{layer} experts={experts}: {len(raw)} != {end - start}")
             raw_view = memoryview(raw)
-            self.packed_coalesced_groups += 1
-            self.packed_coalesced_experts += len(group)
+            self.packed_read_groups += 1
+            self.packed_read_experts += len(group)
+            if len(group) > 1:
+                self.packed_multi_expert_groups += 1
+                self.packed_multi_expert_experts += len(group)
             self.packed_coalesced_extra_bytes += (end - start) - needed
             for record in group:
                 expert_out = self._decode_packed_expert(record["entries"], raw_view, start)
@@ -311,6 +319,22 @@ class Hy3SidecarStore:
         self.loads += 1
         return out
 
+    def _trim_layer_cache(self, layer_cache: OrderedDict[int, dict[str, dict[str, mx.array]]], protected: set[int] | None = None) -> bool:
+        protected = protected or set()
+        evicted = False
+        while len(layer_cache) > self.slot_bank:
+            victim = None
+            for candidate in layer_cache:
+                if candidate not in protected:
+                    victim = candidate
+                    break
+            if victim is None:
+                return evicted
+            del layer_cache[victim]
+            self.evictions += 1
+            evicted = True
+        return evicted
+
     def get_experts(self, layer: int, expert_ids: list[int]) -> dict[str, dict[str, mx.array]]:
         self.get_calls += 1
         self.requested_unique_total += len(expert_ids)
@@ -339,25 +363,12 @@ class Hy3SidecarStore:
                 layer_cache.move_to_end(expert_id)
             self.load_time_s += time.time() - t_load
 
-            evicted = False
-            while len(layer_cache) > self.slot_bank:
-                victim = None
-                for candidate in layer_cache:
-                    if candidate not in requested_set:
-                        victim = candidate
-                        break
-                if victim is None:
-                    # Current request exceeds the configured slot bank; keep it intact
-                    # for this call and let later calls evict when possible.
-                    break
-                del layer_cache[victim]
-                self.evictions += 1
-                evicted = True
-            if evicted and env_truthy("HY3_GC_ON_EVICT"):
-                t_gc = time.time()
-                gc.collect()
-                self.gc_calls += 1
-                self.gc_time_s += time.time() - t_gc
+        evicted = self._trim_layer_cache(layer_cache, protected=requested_set)
+        if evicted and env_truthy("HY3_GC_ON_EVICT"):
+            t_gc = time.time()
+            gc.collect()
+            self.gc_calls += 1
+            self.gc_time_s += time.time() - t_gc
 
         selected = [layer_cache[int(expert_id)] for expert_id in expert_ids]
 
@@ -369,6 +380,12 @@ class Hy3SidecarStore:
                 packed[family][kind] = mx.concatenate([expert[family][kind] for expert in selected], axis=0)
         mx.eval(packed)
         self.pack_time_s += time.time() - t_pack
+        post_pack_evicted = self._trim_layer_cache(layer_cache)
+        if post_pack_evicted and env_truthy("HY3_GC_ON_EVICT"):
+            t_gc = time.time()
+            gc.collect()
+            self.gc_calls += 1
+            self.gc_time_s += time.time() - t_gc
         return packed
 
     def clear_cached_experts(self) -> dict[str, Any]:
@@ -401,8 +418,10 @@ class Hy3SidecarStore:
             "packed_coalesce_max_gib": round(self.packed_coalesce_max_bytes / (1024 ** 3), 6),
             "packed_coalesce_max_overread_ratio": round(self.packed_coalesce_max_overread_ratio, 3),
             "packed_batch_loads": self.packed_batch_loads,
-            "packed_coalesced_groups": self.packed_coalesced_groups,
-            "packed_coalesced_experts": self.packed_coalesced_experts,
+            "packed_read_groups": self.packed_read_groups,
+            "packed_read_experts": self.packed_read_experts,
+            "packed_multi_expert_groups": self.packed_multi_expert_groups,
+            "packed_multi_expert_experts": self.packed_multi_expert_experts,
             "packed_coalesced_extra_gib": round(self.packed_coalesced_extra_bytes / (1024 ** 3), 6),
             "get_calls": self.get_calls,
             "requested_unique_total": self.requested_unique_total,

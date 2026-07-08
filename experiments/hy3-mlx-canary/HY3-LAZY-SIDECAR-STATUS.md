@@ -500,6 +500,8 @@ Measured top5/slot16 `generate-cache`, 8-token decode:
 
 Verdict: 32MiB is the best tested default. Fewer syscalls/bigger reads beat byte purity, but 64MiB overreads too much and loses. A 16-token top5/slot16 run with the 32MiB default completed in **110.934s**, **3,921** reads, **43.783GiB** payload, **1.552GiB** extra payload, and **0.0GiB** swap delta. The lane is more efficient, but still not remotely interactive.
 
+Review hardening after this cut preserves `slot_bank` as a hard post-pack cache cap even when a current request needs more experts than the configured bank; requested tensors are protected only until `mx.eval(packed)` finishes, then the layer cache trims back down. Stats now distinguish total packed read groups/experts from true multi-expert groups, and disable mode (`HY3_PACKED_COALESCE_MAX_GIB=0`) skips overread-ratio validation.
+
 Artifacts: `results/20260707-packed-coalesced-loader-summary.json` plus per-run decode JSONs.
 
 ## DS4 lane cleanup
