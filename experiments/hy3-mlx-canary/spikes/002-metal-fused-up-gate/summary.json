@@ -1,0 +1,101 @@
+{
+  "aggregate": {
+    "full_expert_speedup_max": 1.2332,
+    "full_expert_speedup_mean": 1.0736,
+    "full_expert_speedup_median": 1.0536,
+    "full_expert_speedup_min": 0.9832,
+    "full_fused_median_s_mean": 0.000963,
+    "full_gather_median_s_mean": 0.001035,
+    "n": 6,
+    "up_gate_speedup_max": 1.1116,
+    "up_gate_speedup_mean": 1.0763,
+    "up_gate_speedup_median": 1.0819,
+    "up_gate_speedup_min": 1.0343
+  },
+  "date": "2026-07-07",
+  "experiment": "Fused on-the-fly q4 Metal up+gate+swiglu for one Hy3 expert, followed by normal gather_qmm down projection for full expert timing.",
+  "hypothesis": "Fusing the up and gate q4 matvecs into one Metal kernel should beat separate MLX gather_qmm up/gate plus swiglu, and maybe move full expert-route timing.",
+  "samples": [
+    {
+      "artifact": "spikes/002-metal-fused-up-gate/stable-layer1-expert0.json",
+      "expert": 0,
+      "full_fused_median_s": 0.000951,
+      "full_gather_median_s": 0.001046,
+      "full_speedup_vs_gather": 1.0999,
+      "layer": 1,
+      "max_abs_diff_fused_full_vs_gather_full": 0.09375,
+      "max_abs_diff_fused_vs_gather_swiglu": 0.15050125122070312,
+      "up_gate_fused_median_s": 0.000873,
+      "up_gate_gather_median_s": 0.000939,
+      "up_gate_speedup_vs_gather": 1.0756
+    },
+    {
+      "artifact": "spikes/002-metal-fused-up-gate/stable-layer1-expert17.json",
+      "expert": 17,
+      "full_fused_median_s": 0.000982,
+      "full_gather_median_s": 0.001211,
+      "full_speedup_vs_gather": 1.2332,
+      "layer": 1,
+      "max_abs_diff_fused_full_vs_gather_full": 0.078125,
+      "max_abs_diff_fused_vs_gather_swiglu": 0.16237640380859375,
+      "up_gate_fused_median_s": 0.000932,
+      "up_gate_gather_median_s": 0.000964,
+      "up_gate_speedup_vs_gather": 1.0343
+    },
+    {
+      "artifact": "spikes/002-metal-fused-up-gate/stable-layer40-expert0.json",
+      "expert": 0,
+      "full_fused_median_s": 0.000902,
+      "full_gather_median_s": 0.000938,
+      "full_speedup_vs_gather": 1.0399,
+      "layer": 40,
+      "max_abs_diff_fused_full_vs_gather_full": 0.109375,
+      "max_abs_diff_fused_vs_gather_swiglu": 0.16995859146118164,
+      "up_gate_fused_median_s": 0.000828,
+      "up_gate_gather_median_s": 0.000901,
+      "up_gate_speedup_vs_gather": 1.0882
+    },
+    {
+      "artifact": "spikes/002-metal-fused-up-gate/stable-layer40-expert63.json",
+      "expert": 63,
+      "full_fused_median_s": 0.000939,
+      "full_gather_median_s": 0.000956,
+      "full_speedup_vs_gather": 1.0181,
+      "layer": 40,
+      "max_abs_diff_fused_full_vs_gather_full": 0.125,
+      "max_abs_diff_fused_vs_gather_swiglu": 0.3106565475463867,
+      "up_gate_fused_median_s": 0.000826,
+      "up_gate_gather_median_s": 0.000911,
+      "up_gate_speedup_vs_gather": 1.1029
+    },
+    {
+      "artifact": "spikes/002-metal-fused-up-gate/stable-layer79-expert0.json",
+      "expert": 0,
+      "full_fused_median_s": 0.001055,
+      "full_gather_median_s": 0.001126,
+      "full_speedup_vs_gather": 1.0673,
+      "layer": 79,
+      "max_abs_diff_fused_full_vs_gather_full": 0.125,
+      "max_abs_diff_fused_vs_gather_swiglu": 0.2759571075439453,
+      "up_gate_fused_median_s": 0.000946,
+      "up_gate_gather_median_s": 0.000989,
+      "up_gate_speedup_vs_gather": 1.0455
+    },
+    {
+      "artifact": "spikes/002-metal-fused-up-gate/stable-layer79-expert127.json",
+      "expert": 127,
+      "full_fused_median_s": 0.000952,
+      "full_gather_median_s": 0.000936,
+      "full_speedup_vs_gather": 0.9832,
+      "layer": 79,
+      "max_abs_diff_fused_full_vs_gather_full": 0.125,
+      "max_abs_diff_fused_vs_gather_swiglu": 0.17412090301513672,
+      "up_gate_fused_median_s": 0.000833,
+      "up_gate_gather_median_s": 0.000926,
+      "up_gate_speedup_vs_gather": 1.1116
+    }
+  ],
+  "schema": "hy3-metal-fused-up-gate-summary-v1",
+  "script": "spikes/002-metal-fused-up-gate/metal_fused_up_gate_probe.py",
+  "verdict": "PARTIAL. The fused up+gate Metal primitive consistently beats gather_qmm+swiglu across the stable six-sample pass (median speedup 1.0819x, min 1.0343x), proving the fused q4 kernel direction is real. But the full expert route only improves 1.0536x median / 1.0736x mean and one sample regresses to 0.9832x because the down projection and launch overhead dominate. Do not wire this up+gate-only kernel into runtime yet; next useful kernel must fuse more of the route (down and/or route weighting) or batch many routes without dense FP32 materialization."
+}

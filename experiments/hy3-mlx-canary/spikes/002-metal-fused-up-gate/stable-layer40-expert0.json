@@ -1,0 +1,89 @@
+{
+  "expert": 0,
+  "full_expert_speedup_vs_gather_median": 1.0399,
+  "fused_metal_swiglu_s": {
+    "max": 0.052406,
+    "mean": 0.004029,
+    "median": 0.000828,
+    "min": 0.000289
+  },
+  "fused_speedup_vs_gather_median": 1.0882,
+  "fused_speedup_vs_separate_metal_median": 1.0978,
+  "fused_up_gate_plus_gather_down_full_expert_s": {
+    "max": 0.067766,
+    "mean": 0.003784,
+    "median": 0.000902,
+    "min": 0.000341
+  },
+  "gather_qmm_full_expert_s": {
+    "max": 0.174296,
+    "mean": 0.005023,
+    "median": 0.000938,
+    "min": 0.000382
+  },
+  "gather_qmm_swiglu_s": {
+    "max": 0.066923,
+    "mean": 0.004283,
+    "median": 0.000901,
+    "min": 0.000334
+  },
+  "layer": 40,
+  "max_abs_diff_fused_full_vs_gather_full": 0.109375,
+  "max_abs_diff_fused_vs_gather_swiglu": 0.16995859146118164,
+  "max_abs_diff_separate_metal_vs_gather_swiglu": 0.16995859146118164,
+  "mean_abs_diff_fused_full_vs_gather_full": 0.025446545332670212,
+  "mean_abs_diff_fused_vs_gather_swiglu": 0.01176327932626009,
+  "mean_abs_diff_separate_metal_vs_gather_swiglu": 0.01176327932626009,
+  "ok": true,
+  "schema": "hy3-metal-fused-up-gate-probe-v1",
+  "separate_metal_swiglu_s": {
+    "max": 0.023863,
+    "mean": 0.003872,
+    "median": 0.000909,
+    "min": 0.000362
+  },
+  "shape": {
+    "down": {
+      "groups": 24,
+      "in_dim": 1536,
+      "out_dim": 4096,
+      "packed_words": 192
+    },
+    "threads": 256,
+    "up_gate": {
+      "groups": 64,
+      "in_dim": 4096,
+      "out_dim": 1536,
+      "packed_words": 512
+    }
+  },
+  "sidecar_store": {
+    "cached_experts": 1,
+    "evictions": 0,
+    "gc_calls": 0,
+    "gc_time_s": 0.0,
+    "get_calls": 1,
+    "hits": 0,
+    "layers_with_cache": 1,
+    "layout_path": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json",
+    "load_time_s": 0.012,
+    "loads": 1,
+    "pack_time_s": 0.0,
+    "packed_batch_loads": 1,
+    "packed_coalesce_max_gib": 0.032,
+    "packed_coalesce_max_overread_ratio": 2.0,
+    "packed_coalesced_extra_gib": 0.0,
+    "packed_multi_expert_experts": 0,
+    "packed_multi_expert_groups": 0,
+    "packed_read_experts": 1,
+    "packed_read_groups": 1,
+    "qmm_time_s": 0.0,
+    "read_calls": 1,
+    "read_gib": 0.009888,
+    "remap_time_s": 0.0,
+    "requested_unique_max": 1,
+    "requested_unique_total": 1,
+    "schema": "hy3-packed-sidecar-v1",
+    "slot_bank": 8
+  }
+}
