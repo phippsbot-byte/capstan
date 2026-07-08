@@ -264,3 +264,14 @@ weighted hidden **0.4708x** median vs `gather_qmm`, full route proxy **0.5227x**
 median vs standard. Do not build one-threadgroup-per-route/output-row kernels;
 next serious path needs tiled/simdgroup q4 dot, MPS-backed batch matmul, or a
 deeper fused route kernel.
+
+`../spikes/004-cpp-q4-direct-dot/` tested a CPU cold-route alternative using the
+q4 affine identity `dot(x, q * scale + bias) = scale * sum(q*x) + bias * sum(x)`
+so the runtime can skip dense FP32 materialization. On six real seq4/seq16
+fixtures (layers 1/40/79), the NEON direct-dot path is **2.6212x** median /
+**2.9841x** mean faster than dense-dequant + Accelerate when dequantization is
+included, while matching dense output with `max_rel_to_dense < 5e-7`. It is
+still only **0.4062x** median vs dense compute once dense weights are already
+hot. Verdict: validated for cold/prefill-shaped routes, not a universal
+replacement. A runtime cut should expose a `dense`/`direct`/eventual hybrid mode
+rather than swapping out the hot dense-cache path.
