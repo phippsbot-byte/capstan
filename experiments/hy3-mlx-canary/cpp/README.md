@@ -309,6 +309,19 @@ promotion to default. Artifact:
 | top-k5, 4 tokens | 84.915s | 54.382s / **1.56x** | **52.600s / 1.61x** | direct + hybrid drift |
 | top-k8, 4 tokens | 120.941s | 91.766s / **1.32x** | **82.670s / 1.46x** | direct matched, hybrid drift |
 
-Swap delta stayed **0.0GiB**. Dense remains the default. `hybrid` is an
-experimental cold/hot speed lane until logit-level parity/tolerance is measured
-or mixed dense/direct numerics are tightened enough to avoid argmax drift.
+Swap delta stayed **0.0GiB**. A forced-token logits harness now exists as
+`hy3_lazy_smoke.py forced-logits`; it writes per-step logits to `.npz` so q4
+modes can be compared on an identical dense-token sequence instead of drifting
+through different prompts. Artifact:
+`results/20260708-cpp-route-q4-forced-logits-delta-summary.json`.
+
+| Forced-logits shape | Direct verdict | Hybrid verdict |
+|---|---|---|
+| top-k5, dense sequence | step1 top-2 swap; dense top1 ranked #2 under direct, margin 0.625 | step0 top-2 swap; dense top1 ranked #2 under hybrid, margin 0.375 |
+| top-k8, dense sequence | **all 4 steps same top1**; max RMSE 0.388 | step0 top-2 swap; dense top1 ranked #2 under hybrid, margin 0.125 |
+
+Interpretation: the observed token drift is mostly knife-edge top-2 flips, not
+semantic collapse, but the broader logit deltas are nontrivial. Dense remains
+the default. `direct` top-k8 is the cleanest speed candidate; `hybrid` stays an
+experimental cold/hot speed lane until mixed dense/direct numerics are tightened
+or an explicit logit-tolerance policy is accepted.

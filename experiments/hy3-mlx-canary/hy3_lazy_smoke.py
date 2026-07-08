@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import gc
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -401,9 +402,117 @@ def mode_generate_cache(args) -> dict[str, Any]:
     )
 
 
+def parse_forced_token_ids(value: str | None) -> list[int]:
+    if not value:
+        raise ValueError("--forced-token-ids is required for forced-logits mode")
+    ids = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ids.append(int(part))
+    if not ids:
+        raise ValueError("--forced-token-ids did not contain any token ids")
+    return ids
+
+
+def top_tokens_from_logits(vec: np.ndarray, count: int = 8) -> list[dict[str, Any]]:
+    count = min(count, vec.shape[0])
+    idx = np.argpartition(-vec, count - 1)[:count]
+    idx = idx[np.argsort(-vec[idx])]
+    return [{"token_id": int(i), "logit": float(vec[i])} for i in idx]
+
+
+def mode_forced_logits(args) -> dict[str, Any]:
+    from transformers import AutoTokenizer
+    from mlx_lm.models.cache import make_prompt_cache
+
+    os.environ.setdefault("HY3_SIDECAR_LAYOUT", str(LAYOUT_PATH))
+    os.environ["HY3_SLOT_BANK"] = str(args.slot_bank)
+    forced_ids = parse_forced_token_ids(args.forced_token_ids)
+    tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR), trust_remote_code=True)
+    prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
+    t0 = time.time()
+    model, mod, config, meta = load_lazy_model(eval_params=True)
+    reset_route_trace_if_requested(args, mod)
+    load_s = time.time() - t0
+
+    cache = make_prompt_cache(model)
+    step_timings = []
+    step_summaries = []
+    logits_rows = []
+    for step, forced_id in enumerate(forced_ids):
+        input_ids = prompt_ids if step == 0 else [forced_ids[step - 1]]
+        x = mx.array([input_ids], dtype=mx.int32)
+        t_step = time.time()
+        logits = model(x, cache=cache)
+        mx.eval(logits)
+        elapsed = time.time() - t_step
+        vec = np.array(logits[0, -1, :].astype(mx.float32), dtype=np.float32)
+        greedy_id = int(vec.argmax())
+        forced_logit = float(vec[forced_id])
+        forced_rank = int(np.sum(vec > vec[forced_id]) + 1)
+        top = top_tokens_from_logits(vec, count=args.logit_top_n)
+        top1 = top[0]
+        top2_logit = float(top[1]["logit"]) if len(top) > 1 else float("nan")
+        step_timings.append(round(elapsed, 3))
+        step_summaries.append(
+            {
+                "step": step,
+                "forced_id": int(forced_id),
+                "greedy_id": greedy_id,
+                "forced_rank": forced_rank,
+                "forced_logit": forced_logit,
+                "top1_id": int(top1["token_id"]),
+                "top1_logit": float(top1["logit"]),
+                "top1_margin": float(top1["logit"] - top2_logit),
+                "top_tokens": top,
+            }
+        )
+        logits_rows.append(vec)
+
+    logits_arr = np.stack(logits_rows, axis=0)
+    logits_sha256 = hashlib.sha256(logits_arr.tobytes()).hexdigest()
+    logits_path = None
+    if args.logits_out:
+        args.logits_out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            args.logits_out,
+            logits=logits_arr,
+            forced_ids=np.array(forced_ids, dtype=np.int32),
+            prompt_ids=np.array(prompt_ids, dtype=np.int32),
+        )
+        logits_path = str(args.logits_out)
+    clean_forced_text = tokenizer.decode(forced_ids, skip_special_tokens=True)
+    result = {
+        "ok": True,
+        "mode": "forced-logits",
+        "prompt": args.prompt,
+        "prompt_tokens": len(prompt_ids),
+        "forced_ids": forced_ids,
+        "forced_text_clean": clean_forced_text,
+        "load_s": round(load_s, 3),
+        "step_timings_s": step_timings,
+        "steps": step_summaries,
+        "logits_shape": list(logits_arr.shape),
+        "logits_dtype": str(logits_arr.dtype),
+        "logits_sha256": logits_sha256,
+        "logits_out": logits_path,
+        "resident_tensors": meta["resident_tensors"],
+        "sidecar_store": mod.get_sidecar_store().stats(),
+        "profile": mod.get_profile_stats() if getattr(args, "profile_layers", False) and hasattr(mod, "get_profile_stats") else None,
+    }
+    return attach_route_trace(
+        args,
+        mod,
+        result,
+        {"mode": "forced-logits", "prompt_tokens": len(prompt_ids), "forced_tokens": len(forced_ids), "topk_cap": getattr(args, "topk_cap", None)},
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["expert-read", "resident-load", "forward-one", "generate-raw", "generate-cache"])
+    parser.add_argument("mode", choices=["expert-read", "resident-load", "forward-one", "generate-raw", "generate-cache", "forced-logits"])
     parser.add_argument("--slot-bank", type=int, default=8, help="per-layer expert LRU size for prototype")
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--experts", type=int, default=8)
@@ -421,6 +530,9 @@ def main() -> None:
     parser.add_argument("--topk-cap", type=int, help="experimental cap for routed experts per token; default uses model top-k")
     parser.add_argument("--trace-routes", action="store_true", help="record real router-selected expert ids for C++ scheduler replay")
     parser.add_argument("--route-trace-out", type=Path, help="write route trace TSV for C++ --trace replay")
+    parser.add_argument("--forced-token-ids", help="comma-separated token ids to force for forced-logits mode")
+    parser.add_argument("--logits-out", type=Path, help="write forced-logits per-step logits to compressed npz")
+    parser.add_argument("--logit-top-n", type=int, default=8, help="number of top logits to summarize in forced-logits JSON")
     args = parser.parse_args()
     if args.route_trace_out:
         args.trace_routes = True
@@ -453,6 +565,8 @@ def main() -> None:
             result = mode_generate_raw(args)
         elif args.mode == "generate-cache":
             result = mode_generate_cache(args)
+        elif args.mode == "forced-logits":
+            result = mode_forced_logits(args)
         else:
             raise AssertionError(args.mode)
     except Exception as exc:
