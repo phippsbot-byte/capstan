@@ -1,0 +1,70 @@
+{
+  "baseline_commit": "f485295",
+  "candidate": "uncommitted qlinear_dense_batch + per-expert route batching in hy3_routed_mlp.cpp and hy3_route_mlp_daemon.cpp",
+  "date": "2026-07-07",
+  "experiment": "route-batched SGEMM for dense dequantized q4 expert banks",
+  "hypothesis": "For prompt/prefill fixtures, grouping multiple routes for the same expert into SGEMM should beat repeated SGEMV calls.",
+  "implementation_status": "tested in uncommitted candidate code, then reverted because it regressed the real prefill16 shape",
+  "results": {
+    "prefill16_baseline": {
+      "compute_elapsed_s": 118.617,
+      "gib_read": 29.7521,
+      "label": "HEAD baseline from /tmp/hy3_cpp_baseline",
+      "max_rel_to_expected": 0.0157937,
+      "parity_pass": true,
+      "process_real_s": 119.02,
+      "read_calls": 3009,
+      "selected_routes": 6320,
+      "seq_len": 16,
+      "topk": 5
+    },
+    "prefill16_candidate": {
+      "compute_elapsed_s": 126.959,
+      "gib_read": 29.7521,
+      "label": "route-batched SGEMM candidate",
+      "max_rel_to_expected": 0.0157927,
+      "parity_pass": true,
+      "process_real_s": 127.15,
+      "read_calls": 3009,
+      "selected_routes": 6320,
+      "seq_len": 16,
+      "topk": 5
+    },
+    "prefill16_delta_candidate_minus_baseline": {
+      "compute_elapsed_s": 8.342,
+      "pct_compute": 7.033,
+      "process_real_s": 8.13
+    },
+    "prefill4_baseline": {
+      "compute_elapsed_s": 51.529,
+      "gib_read": 13.9219,
+      "label": "HEAD baseline",
+      "max_rel_to_expected": 0.0141303,
+      "parity_pass": true,
+      "process_real_s": 52.01,
+      "read_calls": 1408,
+      "selected_routes": 1580,
+      "seq_len": 4,
+      "topk": 5
+    },
+    "prefill4_candidate": {
+      "compute_elapsed_s": 50.6858,
+      "gib_read": 13.9219,
+      "label": "route-batched SGEMM candidate",
+      "max_rel_to_expected": 0.0141303,
+      "parity_pass": true,
+      "process_real_s": 50.94,
+      "read_calls": 1408,
+      "selected_routes": 1580,
+      "seq_len": 4,
+      "topk": 5
+    },
+    "prefill4_delta_candidate_minus_baseline": {
+      "compute_elapsed_s": -0.8432,
+      "pct_compute": -1.636,
+      "process_real_s": -1.07
+    }
+  },
+  "schema": "hy3-q4-compute-spike-v1",
+  "verdict": "FALSIFIED. Batched SGEMM was noise/slightly positive on prefill4 but regressed prefill16 by 8.342s compute (+7.032%). Do not replace route SGEMV with naive tiny-batch SGEMM. Next serious path is fused/on-the-fly q4 Metal or a route-batched kernel that avoids dense FP32 materialization and small-M SGEMM overhead."
+}

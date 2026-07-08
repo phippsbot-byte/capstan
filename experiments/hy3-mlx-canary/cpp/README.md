@@ -235,5 +235,9 @@ for MLX. Top-k1 two-token `generate-cache` with an 8GiB dense cache took
 fixture calls drop from 5 reads to 0 reads and ~176ms to ~12ms — but online CPU
 dense SGEMV still loses to MLX `gather_qmm`. A follow-up spike at
 `spikes/001-metal-q4-matvec/` found that a simple custom MLX Metal q4 matvec is
-feasible but only parity/noisy against `gather_qmm`; next serious speed work
-needs fused/route-batched Metal, not another one-projection matvec clone.
+feasible but only parity/noisy against `gather_qmm`. A later route-batched SGEMM
+spike is recorded at `cpp/results/20260707-route-batched-sgemm-spike.json`: it
+kept parity but regressed the seq16 prefill fixture from **118.617s** to
+**126.959s** (+7.0%), so do not replace repeated SGEMV with naïve tiny-batch
+SGEMM. Next serious speed work needs fused/on-the-fly q4 Metal or a kernel that
+avoids dense FP32 materialization and small-M SGEMM overhead.
