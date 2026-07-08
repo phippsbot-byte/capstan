@@ -1,0 +1,225 @@
+{
+  "exact_pong": false,
+  "experiment": {
+    "retain_policy": "freq",
+    "slot_bank": 16,
+    "topk_cap": 5
+  },
+  "generated_ids": [
+    185,
+    120029,
+    72520,
+    423,
+    11,
+    2264,
+    665,
+    1901
+  ],
+  "generated_text": "\n<think>Got it, let's see",
+  "generated_text_clean": "\n<think>Got it, let's see",
+  "load_s": 8.032,
+  "max_new_tokens": 8,
+  "mode": "generate-cache",
+  "ok": true,
+  "profile": {
+    "attn_total_s": 5.053,
+    "cpp_route_mlp": {
+      "calls": 0,
+      "enabled": false
+    },
+    "enabled": true,
+    "layers": 640,
+    "mlp_total_s": 48.449,
+    "moe_times": {
+      "cpp_route_s": 0.0,
+      "router_s": 3.796,
+      "selection_s": 3.62,
+      "shared_s": 4.353,
+      "switch_s": 30.436,
+      "weight_s": 4.624
+    },
+    "profiled_total_s": 60.859,
+    "residual_total_s": 3.478,
+    "routed_mlp_disabled": false,
+    "shared_mlp_disabled": false,
+    "sync_timers": true,
+    "top_attn_layers": [
+      {
+        "attn_s": 0.074,
+        "kind": "moe",
+        "layer": 23,
+        "mlp_s": 0.055,
+        "residual_s": 0.034,
+        "total_s": 0.167
+      },
+      {
+        "attn_s": 0.052,
+        "kind": "dense",
+        "layer": 0,
+        "mlp_s": 0.043,
+        "residual_s": 0.004,
+        "total_s": 0.106
+      },
+      {
+        "attn_s": 0.041,
+        "kind": "moe",
+        "layer": 5,
+        "mlp_s": 0.023,
+        "residual_s": 0.001,
+        "total_s": 0.065
+      },
+      {
+        "attn_s": 0.039,
+        "kind": "moe",
+        "layer": 7,
+        "mlp_s": 0.279,
+        "residual_s": 0.02,
+        "total_s": 0.34
+      },
+      {
+        "attn_s": 0.033,
+        "kind": "moe",
+        "layer": 8,
+        "mlp_s": 0.083,
+        "residual_s": 0.041,
+        "total_s": 0.158
+      },
+      {
+        "attn_s": 0.032,
+        "kind": "moe",
+        "layer": 12,
+        "mlp_s": 0.133,
+        "residual_s": 0.007,
+        "total_s": 0.172
+      },
+      {
+        "attn_s": 0.032,
+        "kind": "moe",
+        "layer": 4,
+        "mlp_s": 0.079,
+        "residual_s": 0.01,
+        "total_s": 0.122
+      },
+      {
+        "attn_s": 0.031,
+        "kind": "moe",
+        "layer": 58,
+        "mlp_s": 0.105,
+        "residual_s": 0.012,
+        "total_s": 0.161
+      }
+    ],
+    "top_mlp_layers": [
+      {
+        "attn_s": 0.01,
+        "kind": "moe",
+        "layer": 1,
+        "mlp_s": 1.494,
+        "residual_s": 0.007,
+        "total_s": 1.511
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 75,
+        "mlp_s": 0.413,
+        "residual_s": 0.0,
+        "total_s": 0.424
+      },
+      {
+        "attn_s": 0.001,
+        "kind": "moe",
+        "layer": 79,
+        "mlp_s": 0.404,
+        "residual_s": 0.0,
+        "total_s": 0.409
+      },
+      {
+        "attn_s": 0.001,
+        "kind": "moe",
+        "layer": 2,
+        "mlp_s": 0.402,
+        "residual_s": 0.0,
+        "total_s": 0.415
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 67,
+        "mlp_s": 0.307,
+        "residual_s": 0.0,
+        "total_s": 0.337
+      },
+      {
+        "attn_s": 0.039,
+        "kind": "moe",
+        "layer": 7,
+        "mlp_s": 0.279,
+        "residual_s": 0.02,
+        "total_s": 0.34
+      },
+      {
+        "attn_s": 0.011,
+        "kind": "moe",
+        "layer": 74,
+        "mlp_s": 0.268,
+        "residual_s": 0.01,
+        "total_s": 0.29
+      },
+      {
+        "attn_s": 0.01,
+        "kind": "moe",
+        "layer": 48,
+        "mlp_s": 0.267,
+        "residual_s": 0.007,
+        "total_s": 0.284
+      }
+    ]
+  },
+  "prompt": "Reply with exactly pong.",
+  "prompt_tokens": 6,
+  "resident_tensors": 2323,
+  "sidecar_store": {
+    "cached_experts": 1264,
+    "evictions": 1599,
+    "gc_calls": 0,
+    "gc_time_s": 0.0,
+    "get_calls": 632,
+    "hits": 1641,
+    "layers_with_cache": 79,
+    "layout_path": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json",
+    "load_time_s": 17.482,
+    "loads": 2863,
+    "pack_time_s": 4.886,
+    "packed_batch_loads": 595,
+    "packed_coalesce_max_gib": 0.064,
+    "packed_coalesce_max_overread_ratio": 2.0,
+    "packed_coalesced_experts": 2863,
+    "packed_coalesced_extra_gib": 5.289917,
+    "packed_coalesced_groups": 2322,
+    "qmm_time_s": 4.798,
+    "read_calls": 2322,
+    "read_gib": 33.598389,
+    "remap_time_s": 0.182,
+    "requested_unique_max": 29,
+    "requested_unique_total": 4504,
+    "schema": "hy3-packed-sidecar-v1",
+    "slot_bank": 16
+  },
+  "step_timings_s": [
+    19.109,
+    6.863,
+    6.681,
+    5.946,
+    5.959,
+    5.495,
+    5.216,
+    5.741
+  ],
+  "swap": {
+    "delta_gib": 0.0,
+    "last_gib": 1.601,
+    "max_gib": 1.601,
+    "start_gib": 1.601
+  }
+}

@@ -100,6 +100,10 @@ class Hy3SidecarStore:
                 self.entries[(int(entry["layer"]), entry["expert_family"], entry["tensor_kind"])] = entry
         self.cache: dict[int, OrderedDict[int, dict[str, dict[str, mx.array]]]] = {}
         self._fd_cache: dict[Path, int] = {}
+        self.packed_coalesce_max_bytes = self._env_gib_to_bytes("HY3_PACKED_COALESCE_MAX_GIB", 0.032)
+        self.packed_coalesce_max_overread_ratio = self._env_float("HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO", 2.0)
+        if self.packed_coalesce_max_overread_ratio < 1.0:
+            raise ValueError("HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO must be >= 1.0")
         self.loads = 0
         self.hits = 0
         self.evictions = 0
@@ -108,12 +112,33 @@ class Hy3SidecarStore:
         self.get_calls = 0
         self.requested_unique_total = 0
         self.requested_unique_max = 0
+        self.packed_batch_loads = 0
+        self.packed_coalesced_groups = 0
+        self.packed_coalesced_experts = 0
+        self.packed_coalesced_extra_bytes = 0
         self.load_time_s = 0.0
         self.pack_time_s = 0.0
         self.remap_time_s = 0.0
         self.qmm_time_s = 0.0
         self.gc_calls = 0
         self.gc_time_s = 0.0
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return default
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {raw!r}")
+        return value
+
+    @classmethod
+    def _env_gib_to_bytes(cls, name: str, default_gib: float) -> int:
+        value = cls._env_float(name, default_gib)
+        if value < 0.0:
+            raise ValueError(f"{name} must be non-negative, got {value}")
+        return int(value * (1024 ** 3))
 
     @staticmethod
     def _dtype_nbytes(dtype: str) -> int:
@@ -154,11 +179,24 @@ class Hy3SidecarStore:
         self.read_bytes += len(raw)
         return raw
 
-    def _load_packed_expert(self, layer: int, expert_id: int) -> dict[str, dict[str, mx.array]]:
+    def _packed_expert_entries(self, layer: int, expert_id: int) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         for family in ("up_proj", "gate_proj", "down_proj"):
             for kind in ("weight", "scales", "biases"):
                 entries.append(self.packed_entries[(layer, expert_id, family, kind)])
+        return entries
+
+    def _decode_packed_expert(self, entries: list[dict[str, Any]], raw_view: memoryview, base_offset: int) -> dict[str, dict[str, mx.array]]:
+        out: dict[str, dict[str, mx.array]] = {"up_proj": {}, "gate_proj": {}, "down_proj": {}}
+        for entry in entries:
+            rel = int(entry["file_offset"]) - base_offset
+            nbytes = int(entry["nbytes"])
+            shape = tuple(int(x) for x in entry["shape"])
+            out[entry["expert_family"]][entry["tensor_kind"]] = self._mx_from_raw(raw_view[rel : rel + nbytes], entry["dtype"], shape)
+        return out
+
+    def _load_packed_expert(self, layer: int, expert_id: int) -> dict[str, dict[str, mx.array]]:
+        entries = self._packed_expert_entries(layer, expert_id)
         paths = {self._packed_path(e) for e in entries}
         if len(paths) != 1:
             raise RuntimeError(f"packed expert L{layer} E{expert_id} spans multiple files: {paths}")
@@ -168,15 +206,64 @@ class Hy3SidecarStore:
         raw = self._pread(path, start, end - start)
         if len(raw) != end - start:
             raise IOError(f"short packed read for L{layer} E{expert_id}: {len(raw)} != {end - start}")
-        out: dict[str, dict[str, mx.array]] = {"up_proj": {}, "gate_proj": {}, "down_proj": {}}
-        raw_view = memoryview(raw)
-        for entry in entries:
-            rel = int(entry["file_offset"]) - start
-            nbytes = int(entry["nbytes"])
-            shape = tuple(int(x) for x in entry["shape"])
-            out[entry["expert_family"]][entry["tensor_kind"]] = self._mx_from_raw(raw_view[rel : rel + nbytes], entry["dtype"], shape)
+        out = self._decode_packed_expert(entries, memoryview(raw), start)
         mx.eval(out)
         self.loads += 1
+        return out
+
+    def _load_packed_experts_batch(self, layer: int, expert_ids: list[int]) -> dict[int, dict[str, dict[str, mx.array]]]:
+        unique_ids = list(dict.fromkeys(expert_ids))
+        if not unique_ids:
+            return {}
+        records: list[dict[str, Any]] = []
+        for expert_id in unique_ids:
+            entries = self._packed_expert_entries(layer, expert_id)
+            paths = {self._packed_path(e) for e in entries}
+            if len(paths) != 1:
+                raise RuntimeError(f"packed expert L{layer} E{expert_id} spans multiple files: {paths}")
+            start = min(int(e["file_offset"]) for e in entries)
+            end = max(int(e["file_offset"]) + int(e["nbytes"]) for e in entries)
+            records.append({"expert": expert_id, "entries": entries, "path": next(iter(paths)), "start": start, "end": end, "needed": end - start})
+        records.sort(key=lambda r: (str(r["path"]), int(r["start"])))
+
+        groups: list[list[dict[str, Any]]] = []
+        for record in records:
+            if not groups or groups[-1][-1]["path"] != record["path"]:
+                groups.append([record])
+                continue
+            group = groups[-1]
+            new_start = int(group[0]["start"])
+            new_end = max(int(group[-1]["end"]), int(record["end"]))
+            needed = sum(int(r["needed"]) for r in group) + int(record["needed"])
+            coalesced = new_end - new_start
+            ratio = coalesced / max(needed, 1)
+            if coalesced <= self.packed_coalesce_max_bytes and ratio <= self.packed_coalesce_max_overread_ratio:
+                group.append(record)
+            else:
+                groups.append([record])
+
+        out: dict[int, dict[str, dict[str, mx.array]]] = {}
+        arrays: list[Any] = []
+        for group in groups:
+            path = group[0]["path"]
+            start = min(int(r["start"]) for r in group)
+            end = max(int(r["end"]) for r in group)
+            needed = sum(int(r["needed"]) for r in group)
+            raw = self._pread(path, start, end - start)
+            if len(raw) != end - start:
+                experts = [int(r["expert"]) for r in group]
+                raise IOError(f"short packed coalesced read for L{layer} experts={experts}: {len(raw)} != {end - start}")
+            raw_view = memoryview(raw)
+            self.packed_coalesced_groups += 1
+            self.packed_coalesced_experts += len(group)
+            self.packed_coalesced_extra_bytes += (end - start) - needed
+            for record in group:
+                expert_out = self._decode_packed_expert(record["entries"], raw_view, start)
+                out[int(record["expert"])] = expert_out
+                arrays.append(expert_out)
+        mx.eval(*arrays)
+        self.loads += len(unique_ids)
+        self.packed_batch_loads += 1
         return out
 
     def _read_one(self, layer: int, family: str, kind: str, expert_id: int) -> mx.array:
@@ -229,26 +316,50 @@ class Hy3SidecarStore:
         self.requested_unique_total += len(expert_ids)
         self.requested_unique_max = max(self.requested_unique_max, len(expert_ids))
         layer_cache = self.cache.setdefault(layer, OrderedDict())
-        selected: list[dict[str, dict[str, mx.array]]] = []
+        requested_set = set(int(expert_id) for expert_id in expert_ids)
+        missing: list[int] = []
+        seen_missing: set[int] = set()
         for expert_id in expert_ids:
+            expert_id = int(expert_id)
             if expert_id in layer_cache:
                 layer_cache.move_to_end(expert_id)
                 self.hits += 1
+            elif expert_id not in seen_missing:
+                missing.append(expert_id)
+                seen_missing.add(expert_id)
+
+        if missing:
+            t_load = time.time()
+            if self.schema == "hy3-packed-sidecar-v1" and self.packed_coalesce_max_bytes > 0:
+                loaded = self._load_packed_experts_batch(layer, missing)
             else:
-                t_load = time.time()
-                layer_cache[expert_id] = self._load_expert(layer, expert_id)
-                self.load_time_s += time.time() - t_load
-                evicted = False
-                while len(layer_cache) > self.slot_bank:
-                    layer_cache.popitem(last=False)
-                    self.evictions += 1
-                    evicted = True
-                if evicted and env_truthy("HY3_GC_ON_EVICT"):
-                    t_gc = time.time()
-                    gc.collect()
-                    self.gc_calls += 1
-                    self.gc_time_s += time.time() - t_gc
-            selected.append(layer_cache[expert_id])
+                loaded = {expert_id: self._load_expert(layer, expert_id) for expert_id in missing}
+            for expert_id in missing:
+                layer_cache[expert_id] = loaded[expert_id]
+                layer_cache.move_to_end(expert_id)
+            self.load_time_s += time.time() - t_load
+
+            evicted = False
+            while len(layer_cache) > self.slot_bank:
+                victim = None
+                for candidate in layer_cache:
+                    if candidate not in requested_set:
+                        victim = candidate
+                        break
+                if victim is None:
+                    # Current request exceeds the configured slot bank; keep it intact
+                    # for this call and let later calls evict when possible.
+                    break
+                del layer_cache[victim]
+                self.evictions += 1
+                evicted = True
+            if evicted and env_truthy("HY3_GC_ON_EVICT"):
+                t_gc = time.time()
+                gc.collect()
+                self.gc_calls += 1
+                self.gc_time_s += time.time() - t_gc
+
+        selected = [layer_cache[int(expert_id)] for expert_id in expert_ids]
 
         t_pack = time.time()
         packed: dict[str, dict[str, mx.array]] = {}
@@ -287,6 +398,12 @@ class Hy3SidecarStore:
             "evictions": self.evictions,
             "read_calls": self.read_calls,
             "read_gib": round(self.read_bytes / (1024 ** 3), 6),
+            "packed_coalesce_max_gib": round(self.packed_coalesce_max_bytes / (1024 ** 3), 6),
+            "packed_coalesce_max_overread_ratio": round(self.packed_coalesce_max_overread_ratio, 3),
+            "packed_batch_loads": self.packed_batch_loads,
+            "packed_coalesced_groups": self.packed_coalesced_groups,
+            "packed_coalesced_experts": self.packed_coalesced_experts,
+            "packed_coalesced_extra_gib": round(self.packed_coalesced_extra_bytes / (1024 ** 3), 6),
             "get_calls": self.get_calls,
             "requested_unique_total": self.requested_unique_total,
             "requested_unique_max": self.requested_unique_max,

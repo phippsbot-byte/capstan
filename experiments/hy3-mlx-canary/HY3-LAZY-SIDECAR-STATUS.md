@@ -486,6 +486,22 @@ Interpretation: native code can now materialize selected expert banks from the p
 
 `hy_v3_mlx_lazy.DEFAULT_LAYOUT` and `hy3_lazy_smoke.LAYOUT_PATH` now default to `/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json` instead of the older v0 sidecar layout. The env override `HY3_SIDECAR_LAYOUT` still works. Top-k1 two-token `generate-cache` smoke with no layout env now reports `schema=hy3-packed-sidecar-v1`, **426** span reads / **4.212158GiB**, **[9.859s, 4.485s]** step timings, and **0.0GiB** swap delta. The old v0-layout comparison was **3,834** tensor reads and **[11.027s, 5.128s]**.
 
+## Bounded packed-read coalescing
+
+Python packed expert loading now batches missing experts per layer into bounded contiguous reads. Defaults: `HY3_PACKED_COALESCE_MAX_GIB=0.032` and `HY3_PACKED_COALESCE_MAX_OVERREAD_RATIO=2.0`; set max GiB to `0` to disable. The layout makes this safe to bound: each expert bank is a fixed contiguous **10,616,832 bytes** (~9.89MiB), adjacent experts are byte-adjacent, and a whole layer is ~**1.898GiB**, so never read min→max without a cap.
+
+Measured top5/slot16 `generate-cache`, 8-token decode:
+
+| Coalesce cap | Step sum | Read calls | Payload | Extra payload | Load time | Switch time | Swap delta |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| disabled | **76.558s** | 2,863 | 28.308GiB | 0.000GiB | 27.074s | 41.247s | 0.0GiB |
+| 32MiB | **59.655s** | 2,540 | 29.683GiB | 1.374GiB | 14.790s | 28.643s | 0.0GiB |
+| 64MiB | **61.010s** | 2,322 | 33.598GiB | 5.290GiB | 17.482s | 30.436s | 0.0GiB |
+
+Verdict: 32MiB is the best tested default. Fewer syscalls/bigger reads beat byte purity, but 64MiB overreads too much and loses. A 16-token top5/slot16 run with the 32MiB default completed in **110.934s**, **3,921** reads, **43.783GiB** payload, **1.552GiB** extra payload, and **0.0GiB** swap delta. The lane is more efficient, but still not remotely interactive.
+
+Artifacts: `results/20260707-packed-coalesced-loader-summary.json` plus per-run decode JSONs.
+
 ## DS4 lane cleanup
 
 DeepSeek V4 Flash SSD lane was stopped before Hy3 runs and restored after each heavy test.
