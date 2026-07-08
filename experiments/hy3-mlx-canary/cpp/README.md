@@ -289,8 +289,13 @@ in at least 8 routes in a fixture/request. Artifact:
 | prefill4 route-exec, 79 layers | 18.573s | 10.178s | **9.405s** / **1.98x** | all pass parity |
 | prefill16 route-exec, 79 layers | 42.078s | 30.760s | **29.559s** / **1.42x** | all pass parity |
 | online `forward-one`, top-k1 C++ route hook | 1.450s | 0.902s | **0.895s** | next token `1655` |
+| online `forward-one`, top-k5 C++ route hook | 6.678s | 4.115s | **4.082s** / **1.64x** | next token `2` |
+| online `forward-one`, top-k8 C++ route hook | 9.517s | **5.727s** | 5.736s / **1.66x** | next token `1655` |
 
 This is the first C++/Capstan Hy3 compute cut that is both runtime-shaped and a
-real speed win. Next useful move is to benchmark a less-approximate online lane
-(top-k5/top-k8 small prompt) and then decide whether to promote `hybrid` as the
-default C++ route mode for Hy3 canaries.
+real speed win. Online top-k5/top-k8 one-token canaries confirm the cold-route
+benefit at less-toy fanout; artifact:
+`results/20260708-cpp-route-q4-online-topk-summary.json`. Do **not** flip the
+runtime default globally yet: one-token forward has little expert reuse, so it
+mostly proves cold/prefill behavior. The next promotion gate is multi-token
+`generate-cache` / hot-cache decode with top-k5 or top-k8.
