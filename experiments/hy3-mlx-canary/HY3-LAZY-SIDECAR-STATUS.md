@@ -510,18 +510,18 @@ Added `hy3_route_locality.py`, a call-level analyzer for `hy3-route-trace-v1` TS
 
 Real trace analyzed: `/Volumes/ModelSSD/logs/hy3-mlx-canary/route-traces/20260707-102115/top5-slot16-pong-3tok-trace.tsv` (**632** events, **237** layer calls, **3** passes, **3,160** selected experts). Artifacts: `results/20260707-route-locality-top5-slot16.json` and `.md`.
 
-Best tested policy by simulated miss count:
+Best tested policy by simulated miss count, now reporting actual coalesced read bytes separately from useful expert payload bytes:
 
-| Slot | Best policy | Misses | Hit rate | Read GiB | Evictions | Oversized calls | Final cache GiB |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 8 | `freq_last` | 2,146 | 0.151 | 21.219 | 1,514 | 79 | 6.249 |
-| 12 | `freq_last` | 2,110 | 0.166 | 20.863 | 1,162 | 79 | 9.374 |
-| 16 | `freq_last` | 2,091 | 0.173 | 20.675 | 827 | 76 | 12.498 |
-| 20 | `freq` | 2,073 | 0.180 | 20.497 | 498 | 51 | 15.573 |
-| 24 | `freq` | 2,060 | 0.185 | 20.369 | 230 | 22 | 18.094 |
-| 32 | `freq` | 2,053 | 0.188 | 20.299 | 6 | 0 | 20.240 |
+| Slot | Best policy | Misses | Hit rate | Actual read GiB | Payload GiB | Extra GiB | Evictions | Oversized calls | Final cache GiB |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8 | `freq_last` | 2,146 | 0.151 | 22.564 | 21.219 | 1.345 | 1,514 | 79 | 6.249 |
+| 12 | `freq_last` | 2,110 | 0.166 | 22.208 | 20.863 | 1.345 | 1,162 | 79 | 9.374 |
+| 16 | `freq_last` | 2,091 | 0.173 | 22.010 | 20.675 | 1.335 | 827 | 76 | 12.498 |
+| 20 | `freq` | 2,073 | 0.180 | 21.832 | 20.497 | 1.335 | 498 | 51 | 15.573 |
+| 24 | `freq` | 2,060 | 0.185 | 21.703 | 20.369 | 1.335 | 230 | 22 | 18.094 |
+| 32 | `freq` | 2,053 | 0.188 | 21.634 | 20.299 | 1.335 | 6 | 0 | 20.240 |
 
-Verdict: cache policy is only a small lever on this trace. At slot16, `freq_last` beats current `freq` by **10** misses (~0.099GiB). Moving slot16→20 saves only **18** misses while adding ~**3.1GiB** final cache. Most churn is baked into route distribution, not LRU ordering. Next runtime experiment should test `HY3_RETAIN_POLICY=freq_last` once, but bigger slot banks are not worth the memory pressure until a kernel/compute path gets much faster.
+Verdict: cache policy is only a small lever on this trace. At slot16, `freq_last` beats current `freq` by **10** misses: current `freq` is **22.129GiB** actual / **20.774GiB** payload, while `freq_last` is **22.010GiB** actual / **20.675GiB** payload. Moving slot16→20 saves only **18** misses while adding ~**3.1GiB** final cache. Most churn is baked into route distribution, not LRU ordering. Next runtime experiment should test `HY3_RETAIN_POLICY=freq_last` once, but bigger slot banks are not worth the memory pressure until a kernel/compute path gets much faster.
 
 ## DS4 lane cleanup
 

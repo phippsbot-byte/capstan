@@ -45,6 +45,19 @@ class RouteCall:
     experts_flat: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class ExpertSpan:
+    layer: int
+    expert: int
+    file: str
+    start: int
+    end: int
+
+    @property
+    def nbytes(self) -> int:
+        return self.end - self.start
+
+
 def parse_int_list(raw: str) -> list[int]:
     out: list[int] = []
     for part in raw.split(","):
@@ -91,10 +104,18 @@ def sha256_file(path: Path) -> str:
 def parse_trace(path: Path) -> tuple[dict[str, Any], list[TraceRow], list[RouteCall]]:
     metadata: dict[str, Any] = {}
     raw_rows: list[tuple[int, int, int, int, tuple[int, ...]]] = []
+    schema: str | None = None
+    seen_events: set[int] = set()
+    last_event: int | None = None
     with path.open("r", encoding="utf-8") as handle:
         for line_no, line in enumerate(handle, 1):
             line = line.rstrip("\n")
             if not line:
+                continue
+            if line.startswith("# schema="):
+                schema = line.split("=", 1)[1]
+                if schema != "hy3-route-trace-v1":
+                    raise ValueError(f"{path}:{line_no}: unsupported trace schema {schema!r}")
                 continue
             if line.startswith("# metadata="):
                 metadata = json.loads(line.split("=", 1)[1])
@@ -105,12 +126,19 @@ def parse_trace(path: Path) -> tuple[dict[str, Any], list[TraceRow], list[RouteC
             if len(parts) != 5:
                 raise ValueError(f"{path}:{line_no}: expected 5 tab-separated fields, got {len(parts)}")
             event, layer, batch, token = (int(parts[i]) for i in range(4))
+            if event in seen_events:
+                raise ValueError(f"{path}:{line_no}: duplicate event id {event}")
+            if last_event is not None and event <= last_event:
+                raise ValueError(f"{path}:{line_no}: event id {event} is not strictly increasing after {last_event}")
+            seen_events.add(event)
+            last_event = event
             experts = tuple(parse_int_list(parts[4]))
             if not experts:
                 raise ValueError(f"{path}:{line_no}: empty experts field")
             raw_rows.append((event, layer, batch, token, experts))
 
-    raw_rows.sort(key=lambda row: row[0])
+    if schema is None:
+        raise ValueError(f"{path}: missing '# schema=hy3-route-trace-v1' header")
     rows: list[TraceRow] = []
     pass_id = 0
     prev_layer: int | None = None
@@ -148,23 +176,24 @@ def parse_trace(path: Path) -> tuple[dict[str, Any], list[TraceRow], list[RouteC
     return metadata, rows, calls
 
 
-def load_span_bytes(manifest_path: Path | None) -> tuple[dict[tuple[int, int], int], int]:
-    if manifest_path is None:
-        return {}, 0
+def load_spans(manifest_path: Path) -> dict[tuple[int, int], ExpertSpan]:
     manifest = json.loads(manifest_path.read_text())
     schema = manifest.get("schema")
-    spans: dict[tuple[int, int], list[int]] = {}
+    spans: dict[tuple[int, int], list[Any]] = {}
     if schema == "hy3-packed-sidecar-v1":
         for entry in manifest["packed_entries"]:
             layer = int(entry["layer"])
             expert = int(entry["expert"])
             start = int(entry["file_offset"])
             end = start + int(entry["nbytes"])
-            current = spans.setdefault((layer, expert), [start, end])
-            current[0] = min(current[0], start)
-            current[1] = max(current[1], end)
+            file_name = str(entry["file"])
+            current = spans.setdefault((layer, expert), [file_name, start, end])
+            if current[0] != file_name:
+                raise ValueError(f"expert L{layer} E{expert} spans multiple files in {manifest_path}")
+            current[1] = min(int(current[1]), start)
+            current[2] = max(int(current[2]), end)
     elif "sidecar_entries" in manifest:
-        # v0 metadata-only layout: each entry has an expert-major first dimension.
+        # v0 metadata-only layout: represent each full expert as an uncoalesced span.
         per_expert: dict[tuple[int, str, str], int] = {}
         for entry in manifest["sidecar_entries"]:
             layer = int(entry["layer"])
@@ -178,17 +207,67 @@ def load_span_bytes(manifest_path: Path | None) -> tuple[dict[tuple[int, int], i
                 elems *= dim
             per_expert[(layer, entry["expert_family"], entry["tensor_kind"])] = elems * dtype_bytes
         layers = sorted({key[0] for key in per_expert})
-        # Expert count is not directly needed for missing-byte estimates; fill rows lazily below.
         for layer in layers:
             one = sum(size for (l, _, _), size in per_expert.items() if l == layer)
             for expert in range(int(manifest.get("num_experts", 192))):
-                spans[(layer, expert)] = [0, one]
+                spans[(layer, expert)] = [f"v0-layer-{layer}-expert-{expert}", 0, one]
     else:
         raise ValueError(f"unsupported manifest schema {schema!r} in {manifest_path}")
 
-    span_bytes = {key: end - start for key, (start, end) in spans.items()}
-    default = int(statistics.median(span_bytes.values())) if span_bytes else 0
-    return span_bytes, default
+    out = {
+        key: ExpertSpan(layer=key[0], expert=key[1], file=str(value[0]), start=int(value[1]), end=int(value[2]))
+        for key, value in spans.items()
+    }
+    if not out:
+        raise ValueError(f"no expert spans found in {manifest_path}")
+    return out
+
+
+def get_span(spans: dict[tuple[int, int], ExpertSpan], layer: int, expert: int) -> ExpertSpan:
+    try:
+        return spans[(layer, expert)]
+    except KeyError as exc:
+        raise ValueError(f"missing manifest span for layer={layer} expert={expert}") from exc
+
+
+def coalesced_read_plan(
+    spans: dict[tuple[int, int], ExpertSpan],
+    layer: int,
+    missing: list[int],
+    *,
+    coalesce_max_bytes: int,
+    coalesce_max_overread_ratio: float,
+) -> tuple[int, int, int, int, int]:
+    """Return payload bytes, actual read bytes, extra bytes, groups, multi-expert groups."""
+    if not missing:
+        return 0, 0, 0, 0, 0
+    records = [get_span(spans, layer, expert) for expert in missing]
+    payload_bytes = sum(record.nbytes for record in records)
+    if coalesce_max_bytes <= 0:
+        return payload_bytes, payload_bytes, 0, len(records), 0
+    records.sort(key=lambda record: (record.file, record.start))
+    groups: list[list[ExpertSpan]] = []
+    for record in records:
+        if not groups or groups[-1][-1].file != record.file:
+            groups.append([record])
+            continue
+        group = groups[-1]
+        new_start = group[0].start
+        new_end = max(group[-1].end, record.end)
+        needed = sum(item.nbytes for item in group) + record.nbytes
+        read_bytes = new_end - new_start
+        ratio = read_bytes / max(needed, 1)
+        if read_bytes <= coalesce_max_bytes and ratio <= coalesce_max_overread_ratio:
+            group.append(record)
+        else:
+            groups.append([record])
+    actual_bytes = 0
+    multi_groups = 0
+    for group in groups:
+        actual_bytes += max(item.end for item in group) - min(item.start for item in group)
+        if len(group) > 1:
+            multi_groups += 1
+    return payload_bytes, actual_bytes, actual_bytes - payload_bytes, len(groups), multi_groups
 
 
 def ordered_unique_for_policy(experts_flat: tuple[int, ...], policy: str) -> list[int]:
@@ -231,7 +310,18 @@ def trim_cache(cache: OrderedDict[int, None], slot_bank: int, protected: set[int
 
 
 def phase_template() -> dict[str, Any]:
-    return {"calls": 0, "unique_requests": 0, "hits": 0, "misses": 0, "evictions": 0, "bytes_read": 0}
+    return {
+        "calls": 0,
+        "unique_requests": 0,
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0,
+        "payload_bytes_read": 0,
+        "bytes_read": 0,
+        "coalesced_extra_bytes": 0,
+        "read_groups": 0,
+        "multi_expert_read_groups": 0,
+    }
 
 
 def simulate_policy(
@@ -239,8 +329,9 @@ def simulate_policy(
     *,
     slot_bank: int,
     policy: str,
-    span_bytes: dict[tuple[int, int], int],
-    default_span_bytes: int,
+    spans: dict[tuple[int, int], ExpertSpan],
+    coalesce_max_bytes: int,
+    coalesce_max_overread_ratio: float,
 ) -> dict[str, Any]:
     if slot_bank < 0:
         raise ValueError("slot_bank must be non-negative")
@@ -253,10 +344,18 @@ def simulate_policy(
         "hits": 0,
         "misses": 0,
         "evictions": 0,
+        "payload_bytes_read": 0,
         "bytes_read": 0,
+        "coalesced_extra_bytes": 0,
+        "read_groups": 0,
+        "multi_expert_read_groups": 0,
         "max_unique_per_call": 0,
     })
     total_hits = total_misses = total_evictions = total_bytes = 0
+    total_payload_bytes = 0
+    total_coalesced_extra_bytes = 0
+    total_read_groups = 0
+    total_multi_expert_read_groups = 0
     total_unique_requests = 0
     total_selections = 0
     oversized_calls = 0
@@ -297,10 +396,28 @@ def simulate_policy(
         for expert in missing:
             cache[expert] = None
             cache.move_to_end(expert)
-            nbytes = span_bytes.get((call.layer, expert), default_span_bytes)
-            total_bytes += nbytes
-            pstats["bytes_read"] += nbytes
-            lstats["bytes_read"] += nbytes
+        payload_bytes, actual_bytes, extra_bytes, read_groups, multi_groups = coalesced_read_plan(
+            spans,
+            call.layer,
+            missing,
+            coalesce_max_bytes=coalesce_max_bytes,
+            coalesce_max_overread_ratio=coalesce_max_overread_ratio,
+        )
+        total_payload_bytes += payload_bytes
+        total_bytes += actual_bytes
+        total_coalesced_extra_bytes += extra_bytes
+        total_read_groups += read_groups
+        total_multi_expert_read_groups += multi_groups
+        pstats["payload_bytes_read"] += payload_bytes
+        pstats["bytes_read"] += actual_bytes
+        pstats["coalesced_extra_bytes"] += extra_bytes
+        pstats["read_groups"] += read_groups
+        pstats["multi_expert_read_groups"] += multi_groups
+        lstats["payload_bytes_read"] += payload_bytes
+        lstats["bytes_read"] += actual_bytes
+        lstats["coalesced_extra_bytes"] += extra_bytes
+        lstats["read_groups"] += read_groups
+        lstats["multi_expert_read_groups"] += multi_groups
 
         # Mirrors Hy3SidecarStore.get_experts(): protect the current request until
         # the packed tensors are materialized, then enforce the hard cap afterward.
@@ -311,7 +428,7 @@ def simulate_policy(
         lstats["evictions"] += evicted + post_evicted
 
     final_cache_experts = sum(len(cache) for cache in caches.values())
-    final_cache_bytes = sum(span_bytes.get((layer, expert), default_span_bytes) for layer, cache in caches.items() for expert in cache)
+    final_cache_bytes = sum(get_span(spans, layer, expert).nbytes for layer, cache in caches.items() for expert in cache)
     layer_rows = []
     for layer, stats in sorted(layer_stats.items()):
         unique_requests = int(stats["unique_requests"])
@@ -321,7 +438,9 @@ def simulate_policy(
                 "layer": layer,
                 **stats,
                 "hit_rate": round(float(stats["hits"]) / unique_requests, 6) if unique_requests else 0.0,
+                "payload_gib_read": round(float(stats["payload_bytes_read"]) / (1024 ** 3), 6),
                 "gib_read": round(float(stats["bytes_read"]) / (1024 ** 3), 6),
+                "coalesced_extra_gib": round(float(stats["coalesced_extra_bytes"]) / (1024 ** 3), 6),
             }
         )
     layer_rows_by_misses = sorted(layer_rows, key=lambda row: (row["misses"], row["evictions"], row["unique_requests"]), reverse=True)
@@ -331,7 +450,9 @@ def simulate_policy(
         phase_out[phase] = {
             **stats,
             "hit_rate": round(float(stats["hits"]) / unique_requests, 6) if unique_requests else 0.0,
+            "payload_gib_read": round(float(stats["payload_bytes_read"]) / (1024 ** 3), 6),
             "gib_read": round(float(stats["bytes_read"]) / (1024 ** 3), 6),
+            "coalesced_extra_gib": round(float(stats["coalesced_extra_bytes"]) / (1024 ** 3), 6),
         }
     return {
         "slot_bank": slot_bank,
@@ -345,8 +466,14 @@ def simulate_policy(
         "evictions": total_evictions,
         "hit_rate": round(total_hits / total_unique_requests, 6) if total_unique_requests else 0.0,
         "miss_rate": round(total_misses / total_unique_requests, 6) if total_unique_requests else 0.0,
+        "payload_bytes_read": total_payload_bytes,
+        "payload_gib_read": round(total_payload_bytes / (1024 ** 3), 6),
         "bytes_read": total_bytes,
         "gib_read": round(total_bytes / (1024 ** 3), 6),
+        "coalesced_extra_bytes": total_coalesced_extra_bytes,
+        "coalesced_extra_gib": round(total_coalesced_extra_bytes / (1024 ** 3), 6),
+        "read_groups": total_read_groups,
+        "multi_expert_read_groups": total_multi_expert_read_groups,
         "oversized_calls": oversized_calls,
         "max_unique_per_call": max_unique_per_call,
         "final_cache_experts": final_cache_experts,
@@ -357,7 +484,7 @@ def simulate_policy(
     }
 
 
-def locality_by_layer(calls: list[RouteCall], span_bytes: dict[tuple[int, int], int], default_span_bytes: int) -> list[dict[str, Any]]:
+def locality_by_layer(calls: list[RouteCall], spans: dict[tuple[int, int], ExpertSpan]) -> list[dict[str, Any]]:
     per_layer_calls: dict[int, list[RouteCall]] = defaultdict(list)
     for call in calls:
         per_layer_calls[call.layer].append(call)
@@ -404,7 +531,7 @@ def locality_by_layer(calls: list[RouteCall], span_bytes: dict[tuple[int, int], 
                 "reuse_gap_calls_p95": percentile(reuse_gaps, 0.95),
                 "reuse_gap_calls_max": max(reuse_gaps) if reuse_gaps else None,
                 "top_experts": [{"expert": expert, "count": count} for expert, count in top],
-                "unique_payload_gib": round(sum(span_bytes.get((layer, expert), default_span_bytes) for expert in counts) / (1024 ** 3), 6),
+                "unique_payload_gib": round(sum(get_span(spans, layer, expert).nbytes for expert in counts) / (1024 ** 3), 6),
             }
         )
     return rows
@@ -430,6 +557,7 @@ def trace_summary(metadata: dict[str, Any], rows: list[TraceRow], calls: list[Ro
         "trace": str(trace_path),
         "trace_sha256": sha256_file(trace_path),
         "metadata": metadata,
+        "phase_inference": "first pass is labeled prefill; later passes are labeled decode; passes are inferred when layer order resets",
         "events": len(rows),
         "calls": len(calls),
         "layers": len({row.layer for row in rows}),
@@ -463,16 +591,18 @@ def write_markdown(path: Path, result: dict[str, Any], focus_slot: int, focus_po
         f"- Passes: **{result['trace_summary']['passes']}**",
         f"- Selected experts: **{result['trace_summary']['selected_experts']}**",
         f"- Avg top-k: **{result['trace_summary']['avg_k']}**",
+        f"- Phase inference: {result['trace_summary']['phase_inference']}",
         "",
         "## Best policy per slot bank",
         "",
-        "| Slot | Best policy | Misses | Hits | Hit rate | Read GiB | Evictions | Oversized calls | Final cache GiB |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Slot | Best policy | Misses | Hits | Hit rate | Actual read GiB | Payload GiB | Extra GiB | Evictions | Oversized calls | Final cache GiB |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in best_by_slot:
         lines.append(
             f"| {row['slot_bank']} | `{row['policy']}` | {row['misses']} | {row['hits']} | {row['hit_rate']:.3f} | "
-            f"{row['gib_read']:.3f} | {row['evictions']} | {row['oversized_calls']} | {row['final_cache_gib']:.3f} |"
+            f"{row['gib_read']:.3f} | {row['payload_gib_read']:.3f} | {row['coalesced_extra_gib']:.3f} | "
+            f"{row['evictions']} | {row['oversized_calls']} | {row['final_cache_gib']:.3f} |"
         )
     if focus:
         lines += [
@@ -481,19 +611,22 @@ def write_markdown(path: Path, result: dict[str, Any], focus_slot: int, focus_po
             "",
             f"- Misses: **{focus['misses']}**",
             f"- Hits: **{focus['hits']}**",
-            f"- Read: **{focus['gib_read']:.3f}GiB**",
+            f"- Actual read: **{focus['gib_read']:.3f}GiB**",
+            f"- Payload read: **{focus['payload_gib_read']:.3f}GiB**",
+            f"- Coalescing extra: **{focus['coalesced_extra_gib']:.3f}GiB**",
             f"- Evictions: **{focus['evictions']}**",
             f"- Final cache: **{focus['final_cache_gib']:.3f}GiB**",
             "",
             "Top miss layers:",
             "",
-            "| Layer | Misses | Hits | Hit rate | Evictions | Unique requests | Max unique/call | Read GiB |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Layer | Misses | Hits | Hit rate | Evictions | Unique requests | Max unique/call | Actual read GiB | Payload GiB | Extra GiB |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
         for row in focus["top_miss_layers"][:12]:
             lines.append(
                 f"| {row['layer']} | {row['misses']} | {row['hits']} | {row['hit_rate']:.3f} | {row['evictions']} | "
-                f"{row['unique_requests']} | {row['max_unique_per_call']} | {row['gib_read']:.3f} |"
+                f"{row['unique_requests']} | {row['max_unique_per_call']} | {row['gib_read']:.3f} | "
+                f"{row['payload_gib_read']:.3f} | {row['coalesced_extra_gib']:.3f} |"
             )
     lines += [
         "",
@@ -542,6 +675,8 @@ def main() -> int:
     parser.add_argument("--focus-slot", type=int, default=16)
     parser.add_argument("--focus-policy", default="freq")
     parser.add_argument("--top-layers", type=int, default=12)
+    parser.add_argument("--coalesce-max-gib", type=float, default=0.032)
+    parser.add_argument("--coalesce-max-overread-ratio", type=float, default=2.0)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--md-out", type=Path)
     args = parser.parse_args()
@@ -552,9 +687,16 @@ def main() -> int:
         raise ValueError(f"unsupported focus policy {args.focus_policy!r}")
     args.focus_policy = args.focus_policy.replace("-", "_")
 
+    if args.coalesce_max_gib < 0:
+        raise ValueError("--coalesce-max-gib must be non-negative")
+    if args.coalesce_max_gib > 0 and args.coalesce_max_overread_ratio < 1.0:
+        raise ValueError("--coalesce-max-overread-ratio must be >= 1.0 when coalescing is enabled")
+    coalesce_max_bytes = int(args.coalesce_max_gib * (1024 ** 3))
+
     metadata, rows, calls = parse_trace(args.trace)
-    span_bytes, default_span_bytes = load_span_bytes(args.manifest if args.manifest else None)
-    locality_rows = locality_by_layer(calls, span_bytes, default_span_bytes)
+    spans = load_spans(args.manifest)
+    expert_span_default_bytes = int(statistics.median([span.nbytes for span in spans.values()]))
+    locality_rows = locality_by_layer(calls, spans)
     simulations: list[dict[str, Any]] = []
     for slot in slot_banks:
         for policy in policies:
@@ -563,16 +705,20 @@ def main() -> int:
                     calls,
                     slot_bank=slot,
                     policy=policy,
-                    span_bytes=span_bytes,
-                    default_span_bytes=default_span_bytes,
+                    spans=spans,
+                    coalesce_max_bytes=coalesce_max_bytes,
+                    coalesce_max_overread_ratio=args.coalesce_max_overread_ratio,
                 )
             )
     result = {
         "schema": "hy3-route-locality-analysis-v1",
         "trace_summary": trace_summary(metadata, rows, calls, args.trace),
         "manifest": str(args.manifest) if args.manifest else None,
-        "expert_span_default_bytes": default_span_bytes,
-        "expert_span_default_mib": round(default_span_bytes / (1024 ** 2), 6) if default_span_bytes else 0.0,
+        "expert_spans": len(spans),
+        "expert_span_default_bytes": expert_span_default_bytes,
+        "expert_span_default_mib": round(expert_span_default_bytes / (1024 ** 2), 6) if expert_span_default_bytes else 0.0,
+        "coalesce_max_gib": args.coalesce_max_gib,
+        "coalesce_max_overread_ratio": args.coalesce_max_overread_ratio if coalesce_max_bytes > 0 else 0.0,
         "slot_banks": slot_banks,
         "policies": policies,
         "focus_slot": args.focus_slot,
