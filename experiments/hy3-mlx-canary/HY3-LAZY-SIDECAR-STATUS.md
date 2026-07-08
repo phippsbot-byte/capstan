@@ -521,7 +521,9 @@ Best tested policy by simulated miss count, now reporting actual coalesced read 
 | 24 | `freq` | 2,060 | 0.185 | 21.703 | 20.369 | 1.335 | 230 | 22 | 18.094 |
 | 32 | `freq` | 2,053 | 0.188 | 21.634 | 20.299 | 1.335 | 6 | 0 | 20.240 |
 
-Verdict: cache policy is only a small lever on this trace. At slot16, `freq_last` beats current `freq` by **10** misses: current `freq` is **22.129GiB** actual / **20.774GiB** payload, while `freq_last` is **22.010GiB** actual / **20.675GiB** payload. Moving slot16→20 saves only **18** misses while adding ~**3.1GiB** final cache. Most churn is baked into route distribution, not LRU ordering. Next runtime experiment should test `HY3_RETAIN_POLICY=freq_last` once, but bigger slot banks are not worth the memory pressure until a kernel/compute path gets much faster.
+Verdict: cache policy is only a small lever on this trace. At slot16, `freq_last` beats current `freq` by **10** misses in simulation: current `freq` is **22.129GiB** actual / **20.774GiB** payload, while `freq_last` is **22.010GiB** actual / **20.675GiB** payload. Moving slot16→20 saves only **18** misses while adding ~**3.1GiB** final cache. Most churn is baked into route distribution, not LRU ordering.
+
+Live confirmation artifact: `results/20260707-decode8-top5-slot16-coalesce-032-freqlast.json`. Same prompt/config as the 32MiB decode8 baseline (`generate-cache`, top5, slot16, 8 tokens, profile+sync timers) but `HY3_RETAIN_POLICY=freq_last`. Result: **59.925s** step sum vs **59.655s** baseline `freq`; **2,888** loads vs **2,863**; **1,616** hits vs **1,641**; **29.920GiB** read vs **29.683GiB**. Swap delta stayed **0.0GiB**. So `freq_last` is not a runtime win; keep `freq` as default and stop spending time on cache ordering. The next real lever is the kernel/compute path.
 
 ## DS4 lane cleanup
 
