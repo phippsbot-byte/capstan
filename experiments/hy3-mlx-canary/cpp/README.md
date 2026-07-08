@@ -203,3 +203,33 @@ order-preserving layer-major wall from **899.48s** to **239.45s**. `--route-exec
 reports the same routed-MoE math as a fixture-backed prompt-slice execution path;
 next cuts are real prompt integration beyond captured fixtures and lower-level
 Metal/SIMD kernels.
+
+## Persistent routed-MoE daemon
+
+`hy3_route_mlp_daemon` is the first online IPC substrate for calling the native
+routed-MoE math from Python. It keeps the compact index and sidecar file handles
+alive, speaks a local little-endian binary stdin/stdout protocol, and is wired
+behind `HY3_CPP_ROUTE_MLP=1` in `hy_v3_mlx_lazy.py`. Optional dense expert reuse
+is enabled with `HY3_CPP_ROUTE_DENSE_CACHE_GIB=<N>` / `--dense-cache-gib N`.
+
+Smoke commands:
+
+```bash
+HY3_CPP_ROUTE_MLP=1 /opt/homebrew/bin/python3.11 hy3_lazy_smoke.py forward-one \
+  --slot-bank 8 --topk-cap 1 --profile-layers --sync-timers
+
+HY3_CPP_ROUTE_MLP=1 HY3_CPP_ROUTE_DENSE_CACHE_GIB=8 \
+  /opt/homebrew/bin/python3.11 hy3_lazy_smoke.py generate-cache \
+  --slot-bank 8 --topk-cap 1 --profile-layers --sync-timers \
+  --prompt 'Reply with exactly pong.' --max-new-tokens 2
+```
+
+Verdict from `/Volumes/ModelSSD/logs/hy3-mlx-canary/cpp-route-daemon/20260707/`
+and `cpp/results/20260707-route-daemon-online.json`: the daemon path is correct
+and useful as an IPC/correctness substrate, but **not yet a speed win**. Top-k1
+`forward-one` matched the MLX next token (`1655`) but took **9.53s** vs **5.87s**
+for MLX. Top-k1 two-token `generate-cache` with an 8GiB dense cache took
+**[23.17s, 10.49s]** vs MLX **[11.03s, 5.13s]**. Dense cache works — repeated
+fixture calls drop from 5 reads to 0 reads and ~176ms to ~12ms — but online CPU
+dense SGEMV still loses to MLX `gather_qmm`. Next serious speed work is a
+Metal/q4 kernel or keeping this daemon as a control substrate only.

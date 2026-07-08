@@ -1,0 +1,88 @@
+{
+  "artifacts": {
+    "forward_one_topk1_cpp": "/Volumes/ModelSSD/logs/hy3-mlx-canary/cpp-route-daemon/20260707/forward-one-topk1-cpp.json",
+    "forward_one_topk1_mlx": "/Volumes/ModelSSD/logs/hy3-mlx-canary/cpp-route-daemon/20260707/forward-one-topk1-mlx.json",
+    "generate_cache_topk1_cpp_dense8": "/Volumes/ModelSSD/logs/hy3-mlx-canary/cpp-route-daemon/20260707/generate-cache-topk1-cpp-dense8.json",
+    "generate_cache_topk1_mlx": "/Volumes/ModelSSD/logs/hy3-mlx-canary/cpp-route-daemon/20260707/generate-cache-topk1-mlx.json"
+  },
+  "forward_one_topk1": {
+    "cpp_forward_s": 9.533,
+    "cpp_route_stats": {
+      "calls": 79,
+      "compute_s": 3.13,
+      "enabled": true,
+      "read_calls": 79,
+      "read_gib": 0.781128,
+      "wall_s": 3.763
+    },
+    "mlx_forward_s": 5.869,
+    "mlx_sidecar_store": {
+      "cached_experts": 79,
+      "evictions": 0,
+      "gc_calls": 0,
+      "gc_time_s": 0.0,
+      "get_calls": 79,
+      "hits": 0,
+      "layers_with_cache": 79,
+      "layout_path": "/Users/nb/LLM/hy3-mlx-canary/hy3-sidecar-layout.json",
+      "load_time_s": 1.042,
+      "loads": 79,
+      "pack_time_s": 0.001,
+      "qmm_time_s": 0.511,
+      "read_calls": 711,
+      "read_gib": 0.781128,
+      "remap_time_s": 0.019,
+      "requested_unique_max": 1,
+      "requested_unique_total": 79,
+      "schema": "hy3-sidecar-layout-v0",
+      "slot_bank": 8
+    },
+    "next_id": 1655,
+    "same_next_id": true
+  },
+  "generate_cache_topk1_two_tokens": {
+    "cpp_dense_cache_gib": 8,
+    "cpp_route_stats": {
+      "calls": 158,
+      "compute_s": 19.015,
+      "enabled": true,
+      "read_calls": 457,
+      "read_gib": 4.518677,
+      "wall_s": 20.463
+    },
+    "cpp_step_timings_s": [
+      23.172,
+      10.486
+    ],
+    "mlx_sidecar_store": {
+      "cached_experts": 426,
+      "evictions": 0,
+      "gc_calls": 0,
+      "gc_time_s": 0.0,
+      "get_calls": 158,
+      "hits": 26,
+      "layers_with_cache": 79,
+      "layout_path": "/Users/nb/LLM/hy3-mlx-canary/hy3-sidecar-layout.json",
+      "load_time_s": 5.384,
+      "loads": 426,
+      "pack_time_s": 0.591,
+      "qmm_time_s": 1.245,
+      "read_calls": 3834,
+      "read_gib": 4.212158,
+      "remap_time_s": 0.044,
+      "requested_unique_max": 6,
+      "requested_unique_total": 452,
+      "schema": "hy3-sidecar-layout-v0",
+      "slot_bank": 8
+    },
+    "mlx_step_timings_s": [
+      11.027,
+      5.128
+    ],
+    "swap_delta_gib_cpp": 0.0,
+    "swap_delta_gib_mlx": 0.0
+  },
+  "interpretation": "Persistent C++ daemon and Python hook are functional. Dense cache eliminates repeat fixture reads/dequant, but CPU dense SGEMV remains slower than MLX gather_qmm on online topk1 canaries. Next runtime speed work should target Metal/q4 kernels or keep this daemon as correctness/IPC substrate only.",
+  "schema": "hy3-cpp-route-daemon-online-ab-v1",
+  "verdict": "experimental_opt_in_slower_than_mlx_on_cpu_dense_path"
+}

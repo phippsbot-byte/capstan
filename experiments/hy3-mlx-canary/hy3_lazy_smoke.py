@@ -333,6 +333,7 @@ def mode_generate_raw(args) -> dict[str, Any]:
         "step_timings_s": step_timings,
         "resident_tensors": meta["resident_tensors"],
         "sidecar_store": mod.get_sidecar_store().stats(),
+        "profile": mod.get_profile_stats() if getattr(args, "profile_layers", False) and hasattr(mod, "get_profile_stats") else None,
     }
     return attach_route_trace(
         args,
@@ -390,6 +391,7 @@ def mode_generate_cache(args) -> dict[str, Any]:
         "step_timings_s": step_timings,
         "resident_tensors": meta["resident_tensors"],
         "sidecar_store": mod.get_sidecar_store().stats(),
+        "profile": mod.get_profile_stats() if getattr(args, "profile_layers", False) and hasattr(mod, "get_profile_stats") else None,
     }
     return attach_route_trace(
         args,

@@ -7,6 +7,8 @@ from __future__ import annotations
 import gc
 import json
 import os
+import struct
+import subprocess
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -22,6 +24,10 @@ from mlx_lm.models.base import BaseModelArgs, create_attention_mask, scaled_dot_
 
 
 DEFAULT_LAYOUT = "/Users/nb/LLM/hy3-mlx-canary/hy3-sidecar-layout.json"
+WORKDIR = Path(__file__).resolve().parent
+DEFAULT_CPP_ROUTE_DAEMON_BIN = str(WORKDIR / "build/hy3-sidecar-io/hy3_route_mlp_daemon")
+DEFAULT_CPP_ROUTE_INDEX = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv"
+DEFAULT_CPP_ROUTE_ROOT = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar"
 
 
 @dataclass
@@ -288,6 +294,7 @@ class Hy3SidecarStore:
 
 
 _STORE: Hy3SidecarStore | None = None
+_CPP_ROUTE_CLIENT: "CppRouteMlpClient | None" = None
 _PROFILE: list[dict[str, Any]] = []
 _ROUTE_TRACE: list[dict[str, Any]] = []
 _ROUTE_EVENT = 0
@@ -504,6 +511,10 @@ def routed_mlp_disabled() -> bool:
     return env_truthy("HY3_DISABLE_ROUTED_MLP")
 
 
+def cpp_route_mlp_enabled() -> bool:
+    return env_truthy("HY3_CPP_ROUTE_MLP")
+
+
 def sync_timers_enabled() -> bool:
     return env_truthy("HY3_SYNC_TIMERS")
 
@@ -522,6 +533,129 @@ def eval_for_timing(*arrays: Any) -> None:
     mx.eval(*arrays)
     if sync_timers_enabled() and hasattr(mx, "synchronize"):
         mx.synchronize()
+
+
+class CppRouteMlpClient:
+    """Persistent binary client for cpp/hy3_route_mlp_daemon.
+
+    This is intentionally opt-in via HY3_CPP_ROUTE_MLP=1. It executes only the
+    routed MoE branch from already-computed hidden states, expert ids, and route
+    weights. Router/attention/shared MLP stay in Python/MLX.
+    """
+
+    REQ = struct.Struct("<4sIIII")
+    RESP = struct.Struct("<4sIIIIdQ")
+
+    def __init__(self) -> None:
+        binary = os.environ.get("HY3_CPP_ROUTE_DAEMON_BIN", DEFAULT_CPP_ROUTE_DAEMON_BIN)
+        index = os.environ.get("HY3_CPP_ROUTE_INDEX", DEFAULT_CPP_ROUTE_INDEX)
+        root = os.environ.get("HY3_CPP_ROUTE_ROOT", DEFAULT_CPP_ROUTE_ROOT)
+        cmd = [binary, "--index", index, "--root", root]
+        dense_cache_gib = os.environ.get("HY3_CPP_ROUTE_DENSE_CACHE_GIB")
+        if dense_cache_gib:
+            cmd.extend(["--dense-cache-gib", dense_cache_gib])
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.calls = 0
+        self.wall_s = 0.0
+        self.compute_s = 0.0
+        self.read_calls = 0
+        self.bytes_read = 0
+
+    def close(self) -> None:
+        proc = self.proc
+        if proc.stdin:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def compute(self, layer: int, x: mx.array, indices: mx.array, route_weights: mx.array) -> mx.array:
+        if self.proc.stdin is None or self.proc.stdout is None:
+            raise RuntimeError("C++ route daemon pipes are closed")
+        mx.eval(x, indices, route_weights)
+        x_np = np.ascontiguousarray(np.array(x.astype(mx.float32), copy=False), dtype=np.float32)
+        idx_np = np.ascontiguousarray(np.array(indices, copy=False), dtype=np.int32)
+        weight_np = np.ascontiguousarray(np.array(route_weights.astype(mx.float32), copy=False), dtype=np.float32)
+        if x_np.ndim != 3 or idx_np.ndim != 3 or weight_np.ndim != 3:
+            raise ValueError(f"C++ route daemon expects [batch, seq, ...], got x={x_np.shape} idx={idx_np.shape} weights={weight_np.shape}")
+        batch, seq_len, hidden = x_np.shape
+        if hidden != 4096:
+            raise ValueError(f"C++ route daemon only supports hidden=4096, got {hidden}")
+        if idx_np.shape[:2] != (batch, seq_len) or weight_np.shape != idx_np.shape:
+            raise ValueError(f"C++ route daemon shape mismatch x={x_np.shape} idx={idx_np.shape} weights={weight_np.shape}")
+        topk = idx_np.shape[-1]
+        flat_seq = batch * seq_len
+        payload = (
+            self.REQ.pack(b"HY3R", int(layer), int(flat_seq), int(topk), 0)
+            + x_np.reshape(flat_seq, 4096).tobytes()
+            + idx_np.reshape(flat_seq, topk).tobytes()
+            + weight_np.reshape(flat_seq, topk).tobytes()
+        )
+        t0 = time.time()
+        self.proc.stdin.write(payload)
+        self.proc.stdin.flush()
+        hdr = self.proc.stdout.read(self.RESP.size)
+        if len(hdr) != self.RESP.size:
+            raise RuntimeError(f"C++ route daemon returned short response header ({len(hdr)} bytes)")
+        magic, status, payload_floats, read_calls, _reserved, compute_s, bytes_read = self.RESP.unpack(hdr)
+        if magic == b"HY3E" or status != 0:
+            msg = self.proc.stdout.read(payload_floats).decode("utf-8", "replace") if payload_floats else "unknown daemon error"
+            raise RuntimeError(f"C++ route daemon error: {msg}")
+        if magic != b"HY3O":
+            raise RuntimeError(f"C++ route daemon returned bad magic: {magic!r}")
+        expected = flat_seq * 4096
+        if payload_floats != expected:
+            raise RuntimeError(f"C++ route daemon payload size mismatch: {payload_floats} != {expected}")
+        raw = self.proc.stdout.read(payload_floats * 4)
+        if len(raw) != payload_floats * 4:
+            raise RuntimeError("C++ route daemon returned short output payload")
+        wall = time.time() - t0
+        self.calls += 1
+        self.wall_s += wall
+        self.compute_s += float(compute_s)
+        self.read_calls += int(read_calls)
+        self.bytes_read += int(bytes_read)
+        out = np.frombuffer(raw, dtype="<f4").reshape(batch, seq_len, 4096).copy()
+        return mx.array(out).astype(x.dtype)
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "calls": self.calls,
+            "wall_s": round(self.wall_s, 3),
+            "compute_s": round(self.compute_s, 3),
+            "read_calls": self.read_calls,
+            "read_gib": round(self.bytes_read / (1024 ** 3), 6),
+        }
+
+
+def get_cpp_route_client() -> CppRouteMlpClient:
+    global _CPP_ROUTE_CLIENT
+    if _CPP_ROUTE_CLIENT is None:
+        _CPP_ROUTE_CLIENT = CppRouteMlpClient()
+    return _CPP_ROUTE_CLIENT
+
+
+def reset_cpp_route_client() -> None:
+    global _CPP_ROUTE_CLIENT
+    if _CPP_ROUTE_CLIENT is not None:
+        _CPP_ROUTE_CLIENT.close()
+    _CPP_ROUTE_CLIENT = None
+
+
+def get_cpp_route_stats() -> dict[str, Any]:
+    return _CPP_ROUTE_CLIENT.stats() if _CPP_ROUTE_CLIENT is not None else {"enabled": cpp_route_mlp_enabled(), "calls": 0}
 
 
 def reset_profile() -> None:
@@ -550,6 +684,7 @@ def get_profile_stats() -> dict[str, Any]:
         "residual_total_s": round(residual_total, 3),
         "profiled_total_s": round(total, 3),
         "moe_times": {key: round(value, 3) for key, value in _MOE_TIMES.items()},
+        "cpp_route_mlp": get_cpp_route_stats(),
         "top_mlp_layers": top_mlp,
         "top_attn_layers": top_attn,
     }
@@ -777,8 +912,11 @@ class Hy3MoE(nn.Module):
                 selected_scores = selected_scores / selected_scores.sum(axis=-1, keepdims=True)
             selected_scores = selected_scores * self.router_scaling_factor
 
-            y = self.switch_mlp(x, inds)
-            y = (y * selected_scores[..., None].astype(mx.float32)).sum(axis=-2).astype(y.dtype)
+            if cpp_route_mlp_enabled():
+                y = get_cpp_route_client().compute(self.layer_idx, x, inds, selected_scores)
+            else:
+                y = self.switch_mlp(x, inds)
+                y = (y * selected_scores[..., None].astype(mx.float32)).sum(axis=-2).astype(y.dtype)
             capture_parity_fixture(self.layer_idx, x, inds, selected_scores, y)
             if self.shared_mlp is not None and not shared_mlp_disabled():
                 y = y + self.shared_mlp(x)
@@ -808,15 +946,20 @@ class Hy3MoE(nn.Module):
         _MOE_TIMES["selection_s"] += time.time() - t
 
         t = time.time()
-        y = self.switch_mlp(x, inds)
-        eval_for_timing(y)
-        _MOE_TIMES["switch_s"] += time.time() - t
+        if cpp_route_mlp_enabled():
+            y = get_cpp_route_client().compute(self.layer_idx, x, inds, selected_scores)
+            eval_for_timing(y)
+            _MOE_TIMES["switch_s"] += time.time() - t
+        else:
+            y = self.switch_mlp(x, inds)
+            eval_for_timing(y)
+            _MOE_TIMES["switch_s"] += time.time() - t
 
-        t = time.time()
-        y = (y * selected_scores[..., None].astype(mx.float32)).sum(axis=-2).astype(y.dtype)
+            t = time.time()
+            y = (y * selected_scores[..., None].astype(mx.float32)).sum(axis=-2).astype(y.dtype)
+            eval_for_timing(y)
+            _MOE_TIMES["weight_s"] += time.time() - t
         capture_parity_fixture(self.layer_idx, x, inds, selected_scores, y)
-        eval_for_timing(y)
-        _MOE_TIMES["weight_s"] += time.time() - t
 
         if self.shared_mlp is not None and not shared_mlp_disabled():
             t = time.time()
