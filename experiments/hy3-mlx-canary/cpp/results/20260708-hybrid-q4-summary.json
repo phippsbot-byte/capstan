@@ -1,0 +1,124 @@
+{
+  "schema": "hy3-hybrid-q4-runtime-benchmark-v1",
+  "date": "2026-07-08",
+  "fixture_spread": {
+    "dense": {
+      "compute_elapsed_s": 2.08466,
+      "parity_pass": true,
+      "max_rel_to_expected": 0.0111019
+    },
+    "direct": {
+      "compute_elapsed_s": 1.1819,
+      "parity_pass": true,
+      "max_rel_to_expected": 0.0111018
+    },
+    "hybrid": {
+      "compute_elapsed_s": 1.13121,
+      "parity_pass": true,
+      "max_rel_to_expected": 0.0111019
+    }
+  },
+  "route_exec": {
+    "prefill4": {
+      "dense": {
+        "compute_elapsed_s": 18.5727,
+        "process_time": "real 18.64\nuser 13.80\nsys 2.38",
+        "parity_pass": true,
+        "max_rel_to_expected": 0.0141303,
+        "read_calls": 1408,
+        "selected_routes": 1580,
+        "gib_read": 13.9219
+      },
+      "direct": {
+        "compute_elapsed_s": 10.178,
+        "process_time": "real 10.24\nuser 5.67\nsys 2.20",
+        "parity_pass": true,
+        "max_rel_to_expected": 0.0141303,
+        "read_calls": 1408,
+        "selected_routes": 1580,
+        "gib_read": 13.9219,
+        "speedup_vs_dense": 1.8247887600707409,
+        "delta_s_vs_dense": -8.3947
+      },
+      "hybrid": {
+        "compute_elapsed_s": 9.40533,
+        "process_time": "real 9.47\nuser 5.66\nsys 2.05",
+        "parity_pass": true,
+        "max_rel_to_expected": 0.0141303,
+        "read_calls": 1408,
+        "selected_routes": 1580,
+        "gib_read": 13.9219,
+        "speedup_vs_dense": 1.9746994523318164,
+        "delta_s_vs_dense": -9.167370000000002
+      }
+    },
+    "prefill16": {
+      "dense": {
+        "compute_elapsed_s": 42.0778,
+        "process_time": "real 42.14\nuser 31.89\nsys 4.94",
+        "parity_pass": true,
+        "max_rel_to_expected": 0.0157937,
+        "read_calls": 3009,
+        "selected_routes": 6320,
+        "gib_read": 29.7521
+      },
+      "direct": {
+        "compute_elapsed_s": 30.7596,
+        "process_time": "real 30.83\nuser 20.86\nsys 4.86",
+        "parity_pass": true,
+        "max_rel_to_expected": 0.0157939,
+        "read_calls": 3009,
+        "selected_routes": 6320,
+        "gib_read": 29.7521,
+        "speedup_vs_dense": 1.3679566704378472,
+        "delta_s_vs_dense": -11.318200000000004
+      },
+      "hybrid": {
+        "compute_elapsed_s": 29.5592,
+        "process_time": "real 29.63\nuser 19.65\nsys 4.87",
+        "parity_pass": true,
+        "max_rel_to_expected": 0.0157939,
+        "read_calls": 3009,
+        "selected_routes": 6320,
+        "gib_read": 29.7521,
+        "speedup_vs_dense": 1.423509431919673,
+        "delta_s_vs_dense": -12.518600000000003
+      }
+    }
+  },
+  "online_forward_one_topk1": {
+    "dense": {
+      "ok": true,
+      "next_id": 1655,
+      "forward_s": 1.45,
+      "cpp_route_compute_s": 0.887,
+      "cpp_route_wall_s": 0.955,
+      "read_gib": 0.781128,
+      "q4_mode": "dense"
+    },
+    "direct": {
+      "ok": true,
+      "next_id": 1655,
+      "forward_s": 0.902,
+      "cpp_route_compute_s": 0.372,
+      "cpp_route_wall_s": 0.441,
+      "read_gib": 0.781128,
+      "q4_mode": "direct",
+      "forward_speedup_vs_dense": 1.6075388026607538,
+      "forward_delta_s_vs_dense": -0.5479999999999999,
+      "cpp_compute_speedup_vs_dense": 2.3844086021505375
+    },
+    "hybrid": {
+      "ok": true,
+      "next_id": 1655,
+      "forward_s": 0.895,
+      "cpp_route_compute_s": 0.373,
+      "cpp_route_wall_s": 0.443,
+      "read_gib": 0.781128,
+      "q4_mode": "hybrid",
+      "forward_speedup_vs_dense": 1.6201117318435754,
+      "forward_delta_s_vs_dense": -0.5549999999999999,
+      "cpp_compute_speedup_vs_dense": 2.3780160857908847
+    }
+  }
+}

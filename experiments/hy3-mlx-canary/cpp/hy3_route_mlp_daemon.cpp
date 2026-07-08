@@ -21,11 +21,41 @@ namespace fs = std::filesystem;
 constexpr double kMaxDenseCacheGiB = 16.0;
 constexpr double kBytesPerGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr size_t kDenseExpertBytes = static_cast<size_t>(3) * static_cast<size_t>(1536) * static_cast<size_t>(4096) * sizeof(float);
+constexpr int kHybridDenseRouteThreshold = 8;
+
+enum class Q4ExecutionMode {
+  Dense,
+  Direct,
+  Hybrid,
+};
+
+static Q4ExecutionMode parse_q4_mode(const std::string &mode) {
+  if (mode == "dense") return Q4ExecutionMode::Dense;
+  if (mode == "direct") return Q4ExecutionMode::Direct;
+  if (mode == "hybrid") return Q4ExecutionMode::Hybrid;
+  throw std::runtime_error("--q4-mode must be dense, direct, or hybrid");
+}
+
+static const char *q4_mode_name(Q4ExecutionMode mode) {
+  switch (mode) {
+    case Q4ExecutionMode::Dense: return "dense";
+    case Q4ExecutionMode::Direct: return "direct";
+    case Q4ExecutionMode::Hybrid: return "hybrid";
+  }
+  return "unknown";
+}
+
+static bool use_dense_for_expert(Q4ExecutionMode mode, int route_count) {
+  if (mode == Q4ExecutionMode::Dense) return true;
+  if (mode == Q4ExecutionMode::Direct) return false;
+  return route_count >= kHybridDenseRouteThreshold;
+}
 
 struct Args {
   fs::path index;
   fs::path root;
   double dense_cache_gib = 0.0;
+  Q4ExecutionMode q4_mode = Q4ExecutionMode::Dense;
 };
 
 struct DenseExpertBank {
@@ -67,8 +97,9 @@ static Args parse_args(int argc, char **argv) {
     if (key == "--index") args.index = need("--index");
     else if (key == "--root") args.root = need("--root");
     else if (key == "--dense-cache-gib") args.dense_cache_gib = std::stod(need("--dense-cache-gib"));
+    else if (key == "--q4-mode") args.q4_mode = parse_q4_mode(need("--q4-mode"));
     else if (key == "--help" || key == "-h") {
-      std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N<=16]\n");
+      std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N<=16] [--q4-mode dense|direct|hybrid]\n");
       std::exit(0);
     } else {
       throw std::runtime_error("unknown arg: " + key);
@@ -215,6 +246,34 @@ static void compute_expert_route_dense(
   std::copy(down.begin(), down.end(), route_outputs.begin() + route * 4096);
 }
 
+static void compute_expert_route_direct(
+    const ExpertBank &bank,
+    const float *x,
+    size_t route,
+    std::vector<float> &route_outputs,
+    std::vector<float> &xvec,
+    std::vector<float> &hidden,
+    std::vector<float> &down,
+    std::vector<float> &group_sums) {
+  xvec.assign(x, x + 4096);
+  qlinear_pair_swiglu_direct(
+      xvec,
+      bank.up_w,
+      bank.up_s,
+      bank.up_b,
+      bank.gate_w,
+      bank.gate_s,
+      bank.gate_b,
+      1536,
+      4096,
+      512,
+      64,
+      hidden,
+      group_sums);
+  qlinear_direct(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down, group_sums);
+  std::copy(down.begin(), down.end(), route_outputs.begin() + route * 4096);
+}
+
 static uint64_t span_nbytes_for_route(const std::unordered_map<uint64_t, Span> &spans, int layer, int expert) {
   auto it = spans.find(span_key(layer, expert));
   if (it == spans.end()) throw std::runtime_error("missing expert span for daemon request");
@@ -238,7 +297,8 @@ static ComputeResult compute_request(
     const std::vector<Entry> &entries,
     const std::unordered_map<uint64_t, Span> &spans,
     FdCache &fds,
-    DenseExpertCache &dense_cache) {
+    DenseExpertCache &dense_cache,
+    Q4ExecutionMode q4_mode) {
   if (layer < 0) throw std::runtime_error("layer must be non-negative");
   if (seq_len < 1 || seq_len > 4096) throw std::runtime_error("seq_len out of supported range");
   if (topk < 1 || topk > 64) throw std::runtime_error("topk out of supported range");
@@ -258,17 +318,34 @@ static ComputeResult compute_request(
     if (seen.insert(static_cast<int>(expert)).second) unique_experts.push_back(static_cast<int>(expert));
   }
 
+  std::unordered_map<int, int> route_counts;
+  route_counts.reserve(unique_experts.size());
+  for (int32_t expert : experts_flat) ++route_counts[static_cast<int>(expert)];
+
   std::vector<float> route_outputs(static_cast<size_t>(seq_len) * static_cast<size_t>(topk) * 4096, 0.0f);
-  std::vector<float> xvec, up, gate, swiglu_hidden, down;
+  std::vector<float> xvec, up, gate, swiglu_hidden, down, group_sums;
   for (int expert : unique_experts) {
-    const DenseExpertBank &dense_bank = dense_cache.get(layer, expert, entries, spans, fds, result.read_calls, result.bytes_read);
+    const bool use_dense = use_dense_for_expert(q4_mode, route_counts[expert]);
+    std::unique_ptr<ExpertBank> raw_bank;
+    const DenseExpertBank *dense_bank = nullptr;
+    if (use_dense) {
+      dense_bank = &dense_cache.get(layer, expert, entries, spans, fds, result.read_calls, result.bytes_read);
+    } else {
+      raw_bank = std::make_unique<ExpertBank>(load_expert_bank(entries, spans, fds, layer, expert));
+      result.bytes_read += raw_bank->raw.size();
+      ++result.read_calls;
+    }
     for (int token = 0; token < seq_len; ++token) {
       const float *x = hidden_flat.data() + static_cast<size_t>(token) * 4096;
       for (int k = 0; k < topk; ++k) {
         size_t route = static_cast<size_t>(token) * static_cast<size_t>(topk) + static_cast<size_t>(k);
         if (experts_flat[route] != expert) continue;
         (void)span_nbytes_for_route(spans, layer, expert);
-        compute_expert_route_dense(dense_bank, x, route, route_outputs, xvec, up, gate, swiglu_hidden, down);
+        if (use_dense) {
+          compute_expert_route_dense(*dense_bank, x, route, route_outputs, xvec, up, gate, swiglu_hidden, down);
+        } else {
+          compute_expert_route_direct(*raw_bank, x, route, route_outputs, xvec, swiglu_hidden, down, group_sums);
+        }
       }
     }
   }
@@ -307,11 +384,12 @@ int main(int argc, char **argv) {
     DenseExpertCache dense_cache(dense_cache_bytes);
     std::fprintf(
         stderr,
-        "hy3_route_mlp_daemon ready entries=%zu spans=%zu dense_cache_gib=%.3f dense_expert_gib=%.6f\n",
+        "hy3_route_mlp_daemon ready entries=%zu spans=%zu dense_cache_gib=%.3f dense_expert_gib=%.6f q4_mode=%s\n",
         entries.size(),
         spans.size(),
         args.dense_cache_gib,
-        static_cast<double>(kDenseExpertBytes) / kBytesPerGiB);
+        static_cast<double>(kDenseExpertBytes) / kBytesPerGiB,
+        q4_mode_name(args.q4_mode));
     std::fflush(stderr);
 
     while (true) {
@@ -328,7 +406,7 @@ int main(int argc, char **argv) {
         if (!read_full(STDIN_FILENO, hidden.data(), hidden.size() * sizeof(float))) throw std::runtime_error("short hidden payload");
         if (!read_full(STDIN_FILENO, experts.data(), experts.size() * sizeof(int32_t))) throw std::runtime_error("short expert payload");
         if (!read_full(STDIN_FILENO, weights.data(), weights.size() * sizeof(float))) throw std::runtime_error("short route weight payload");
-        ComputeResult result = compute_request(static_cast<int>(req.layer), static_cast<int>(req.seq_len), static_cast<int>(req.topk), hidden, experts, weights, entries, spans, fds, dense_cache);
+        ComputeResult result = compute_request(static_cast<int>(req.layer), static_cast<int>(req.seq_len), static_cast<int>(req.topk), hidden, experts, weights, entries, spans, fds, dense_cache, args.q4_mode);
         ResponseHeader hdr{};
         std::memcpy(hdr.magic, "HY3O", 4);
         hdr.status = 0;

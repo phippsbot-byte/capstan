@@ -34,6 +34,7 @@ struct ParityResult {
   int topk = 0;
   int seq_len = 1;
   bool layer_major = false;
+  std::string q4_mode;
   int read_calls = 0;
   int naive_read_calls = 0;
   int unique_expert_spans = 0;
@@ -47,6 +48,15 @@ struct ParityResult {
 
 ParityFixture load_parity_fixture(const fs::path &path);
 std::vector<fs::path> load_fixture_list(const fs::path &list_path);
+
+enum class Q4ExecutionMode {
+  Dense,
+  Direct,
+  Hybrid,
+};
+
+Q4ExecutionMode parse_q4_execution_mode(const std::string &mode);
+const char *q4_execution_mode_name(Q4ExecutionMode mode);
 struct RoutedComputeResult {
   std::vector<float> actual;
   int read_calls = 0;
@@ -63,7 +73,8 @@ RoutedComputeResult compute_routed_fixture(
     const std::vector<Entry> &entries,
     const std::unordered_map<uint64_t, Span> &spans,
     const fs::path &root,
-    bool layer_major = false);
+    bool layer_major = false,
+    Q4ExecutionMode q4_mode = Q4ExecutionMode::Dense);
 ErrorStats compare_vectors(const std::vector<float> &actual, const std::vector<float> &expected);
 bool parity_passes(const ErrorStats &stats);
 ParityResult run_parity_fixture(
@@ -71,4 +82,5 @@ ParityResult run_parity_fixture(
     const std::vector<Entry> &entries,
     const std::unordered_map<uint64_t, Span> &spans,
     const fs::path &root,
-    bool layer_major = false);
+    bool layer_major = false,
+    Q4ExecutionMode q4_mode = Q4ExecutionMode::Dense);

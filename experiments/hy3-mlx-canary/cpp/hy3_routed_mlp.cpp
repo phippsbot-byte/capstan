@@ -11,7 +11,26 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
+
+static constexpr int HYBRID_DENSE_ROUTE_THRESHOLD = 8;
+
+Q4ExecutionMode parse_q4_execution_mode(const std::string &mode) {
+  if (mode == "dense") return Q4ExecutionMode::Dense;
+  if (mode == "direct") return Q4ExecutionMode::Direct;
+  if (mode == "hybrid") return Q4ExecutionMode::Hybrid;
+  throw std::runtime_error("--q4-mode must be dense, direct, or hybrid");
+}
+
+const char *q4_execution_mode_name(Q4ExecutionMode mode) {
+  switch (mode) {
+    case Q4ExecutionMode::Dense: return "dense";
+    case Q4ExecutionMode::Direct: return "direct";
+    case Q4ExecutionMode::Hybrid: return "hybrid";
+  }
+  return "unknown";
+}
 
 static std::string read_text_file(const fs::path &path) {
   FILE *f = std::fopen(path.c_str(), "rb");
@@ -178,6 +197,38 @@ static void compute_expert_route_dense(
   std::copy(down.begin(), down.end(), route_outputs.begin() + route * 4096);
 }
 
+static void compute_expert_route_direct(
+    const ExpertBank &bank,
+    const std::vector<float> &x,
+    size_t route,
+    std::vector<float> &route_outputs,
+    std::vector<float> &hidden,
+    std::vector<float> &down,
+    std::vector<float> &group_sums) {
+  qlinear_pair_swiglu_direct(
+      x,
+      bank.up_w,
+      bank.up_s,
+      bank.up_b,
+      bank.gate_w,
+      bank.gate_s,
+      bank.gate_b,
+      1536,
+      4096,
+      512,
+      64,
+      hidden,
+      group_sums);
+  qlinear_direct(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down, group_sums);
+  std::copy(down.begin(), down.end(), route_outputs.begin() + route * 4096);
+}
+
+static bool use_dense_for_expert(Q4ExecutionMode mode, int route_count) {
+  if (mode == Q4ExecutionMode::Dense) return true;
+  if (mode == Q4ExecutionMode::Direct) return false;
+  return route_count >= HYBRID_DENSE_ROUTE_THRESHOLD;
+}
+
 static void apply_expert_route(
     const ExpertBank &bank,
     const std::vector<float> &x,
@@ -187,16 +238,36 @@ static void apply_expert_route(
     std::vector<float> &up,
     std::vector<float> &gate,
     std::vector<float> &hidden,
-    std::vector<float> &down) {
-  qlinear(x, bank.up_w, bank.up_s, bank.up_b, 1536, 4096, 512, 64, up);
-  qlinear(x, bank.gate_w, bank.gate_s, bank.gate_b, 1536, 4096, 512, 64, gate);
-  hidden.resize(1536);
-  for (int i = 0; i < 1536; ++i) hidden[static_cast<size_t>(i)] = silu(gate[static_cast<size_t>(i)]) * up[static_cast<size_t>(i)];
-  qlinear(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down);
+    std::vector<float> &down,
+    std::vector<float> &group_sums,
+    Q4ExecutionMode q4_mode) {
+  if (use_dense_for_expert(q4_mode, 1)) {
+    qlinear(x, bank.up_w, bank.up_s, bank.up_b, 1536, 4096, 512, 64, up);
+    qlinear(x, bank.gate_w, bank.gate_s, bank.gate_b, 1536, 4096, 512, 64, gate);
+    hidden.resize(1536);
+    for (int i = 0; i < 1536; ++i) hidden[static_cast<size_t>(i)] = silu(gate[static_cast<size_t>(i)]) * up[static_cast<size_t>(i)];
+    qlinear(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down);
+  } else {
+    qlinear_pair_swiglu_direct(
+        x,
+        bank.up_w,
+        bank.up_s,
+        bank.up_b,
+        bank.gate_w,
+        bank.gate_s,
+        bank.gate_b,
+        1536,
+        4096,
+        512,
+        64,
+        hidden,
+        group_sums);
+    qlinear_direct(hidden, bank.down_w, bank.down_s, bank.down_b, 4096, 1536, 192, 24, down, group_sums);
+  }
   for (int i = 0; i < 4096; ++i) routed[static_cast<size_t>(token) * 4096 + static_cast<size_t>(i)] += weight * down[static_cast<size_t>(i)];
 }
 
-RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, bool layer_major) {
+RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, bool layer_major, Q4ExecutionMode q4_mode) {
   FdCache fds(root);
   RoutedComputeResult result;
   result.actual.assign(static_cast<size_t>(fx.seq_len * 4096), 0.0f);
@@ -217,7 +288,7 @@ RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::v
     }
   }
 
-  std::vector<float> up, gate, hidden, down;
+  std::vector<float> up, gate, hidden, down, group_sums;
   if (!layer_major) {
     for (int token = 0; token < fx.seq_len; ++token) {
       std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
@@ -226,22 +297,32 @@ RoutedComputeResult compute_routed_fixture(const ParityFixture &fx, const std::v
         ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, fx.experts_flat[route]);
         result.bytes_read += bank.raw.size();
         ++result.read_calls;
-        apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down);
+        apply_expert_route(bank, x, fx.route_weights_flat[route], token, result.actual, up, gate, hidden, down, group_sums, q4_mode);
       }
     }
   } else {
+    std::unordered_map<int, int> route_counts;
+    route_counts.reserve(unique_experts.size());
+    for (int expert : fx.experts_flat) ++route_counts[expert];
+
     std::vector<float> route_outputs(static_cast<size_t>(fx.seq_len) * static_cast<size_t>(fx.topk) * 4096, 0.0f);
     for (int expert : unique_experts) {
       ExpertBank bank = load_expert_bank(entries, spans, fds, fx.layer, expert);
       result.bytes_read += bank.raw.size();
       ++result.read_calls;
-      DenseExpertBank dense_bank = dequantize_expert_bank(bank);
+      const bool use_dense = use_dense_for_expert(q4_mode, route_counts[expert]);
+      DenseExpertBank dense_bank;
+      if (use_dense) dense_bank = dequantize_expert_bank(bank);
       for (int token = 0; token < fx.seq_len; ++token) {
         std::vector<float> x(fx.hidden_flat.begin() + static_cast<size_t>(token) * 4096, fx.hidden_flat.begin() + static_cast<size_t>(token + 1) * 4096);
         for (int k = 0; k < fx.topk; ++k) {
           size_t route = static_cast<size_t>(token * fx.topk + k);
           if (fx.experts_flat[route] != expert) continue;
-          compute_expert_route_dense(dense_bank, x, route, route_outputs, up, gate, hidden, down);
+          if (use_dense) {
+            compute_expert_route_dense(dense_bank, x, route, route_outputs, up, gate, hidden, down);
+          } else {
+            compute_expert_route_direct(bank, x, route, route_outputs, hidden, down, group_sums);
+          }
         }
       }
     }
@@ -286,10 +367,10 @@ bool parity_passes(const ErrorStats &stats) {
   return stats.max_abs <= std::max(1.0e-4, 2.0e-2 * stats.expected_max_abs);
 }
 
-ParityResult run_parity_fixture(const fs::path &fixture_path, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, bool layer_major) {
+ParityResult run_parity_fixture(const fs::path &fixture_path, const std::vector<Entry> &entries, const std::unordered_map<uint64_t, Span> &spans, const fs::path &root, bool layer_major, Q4ExecutionMode q4_mode) {
   ParityFixture fx = load_parity_fixture(fixture_path);
   auto t0 = std::chrono::steady_clock::now();
-  RoutedComputeResult compute = compute_routed_fixture(fx, entries, spans, root, layer_major);
+  RoutedComputeResult compute = compute_routed_fixture(fx, entries, spans, root, layer_major, q4_mode);
   auto t1 = std::chrono::steady_clock::now();
   ParityResult result;
   result.fixture = fixture_path;
@@ -297,6 +378,7 @@ ParityResult run_parity_fixture(const fs::path &fixture_path, const std::vector<
   result.topk = fx.topk;
   result.seq_len = fx.seq_len;
   result.layer_major = layer_major;
+  result.q4_mode = q4_execution_mode_name(q4_mode);
   result.read_calls = compute.read_calls;
   result.naive_read_calls = compute.naive_read_calls;
   result.unique_expert_spans = compute.unique_expert_spans;

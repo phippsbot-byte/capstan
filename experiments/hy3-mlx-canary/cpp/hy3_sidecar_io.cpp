@@ -42,6 +42,7 @@ struct Args {
   bool no_read = false;
   bool layer_major = false;
   bool route_exec = false;
+  Q4ExecutionMode q4_mode = Q4ExecutionMode::Dense;
   std::string checksum = "sample";
   std::string policy = "freq";
   std::string route_pattern = "rolling";
@@ -78,7 +79,7 @@ static void usage() {
   std::cerr << "usage: hy3_sidecar_io --index compact-index.tsv --root sidecar-root "
                "(--fixture parity.json | --fixture-list fixtures.txt | --trace route.tsv | --layer N --experts a,b,c | --layers A-B --topk K) "
                "[--simulate-tokens N --slot-bank N --policy lru|freq --route-pattern fixed|hot|rolling] "
-               "[--layer-major] [--route-exec] [--iterations N] [--checksum sample|full|none] [--no-read]\n";
+               "[--layer-major] [--route-exec] [--q4-mode dense|direct|hybrid] [--iterations N] [--checksum sample|full|none] [--no-read]\n";
 }
 
 static Args parse_args(int argc, char **argv) {
@@ -103,6 +104,7 @@ static Args parse_args(int argc, char **argv) {
     else if (key == "--slot-bank") args.slot_bank = std::stoi(need_value("--slot-bank"));
     else if (key == "--policy") args.policy = need_value("--policy");
     else if (key == "--route-pattern") args.route_pattern = need_value("--route-pattern");
+    else if (key == "--q4-mode") args.q4_mode = parse_q4_execution_mode(need_value("--q4-mode"));
     else if (key == "--checksum") args.checksum = need_value("--checksum");
     else if (key == "--no-read") args.no_read = true;
     else if (key == "--layer-major") args.layer_major = true;
@@ -356,10 +358,11 @@ int main(int argc, char **argv) {
     auto index_elapsed = std::chrono::duration<double>(t_index1 - t_index0).count();
 
     if (!args.fixture.empty()) {
-      ParityResult result = run_parity_fixture(args.fixture, entries, spans, args.root, args.layer_major);
+      ParityResult result = run_parity_fixture(args.fixture, entries, spans, args.root, args.layer_major, args.q4_mode);
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
       std::cout << "  \"mode\": \"" << (args.layer_major ? "parity-fixture-layer-major" : "parity-fixture") << "\",\n";
+      std::cout << "  \"q4_mode\": \"" << q4_execution_mode_name(args.q4_mode) << "\",\n";
       std::cout << "  \"fixture\": \"" << json_escape(args.fixture.string()) << "\",\n";
       std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
       std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";
@@ -418,7 +421,7 @@ int main(int argc, char **argv) {
       int previous_layer = -1;
       bool all_pass = true;
       for (const auto &fixture_path : fixture_paths) {
-        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root, true);
+        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root, true, args.q4_mode);
         if (seq_len < 0) seq_len = result.seq_len;
         if (topk < 0) topk = result.topk;
         if (result.seq_len != seq_len) throw std::runtime_error("--route-exec fixture list has mixed seq_len values");
@@ -454,6 +457,7 @@ int main(int argc, char **argv) {
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
       std::cout << "  \"mode\": \"prompt-routed-moe-fixture-exec\",\n";
+      std::cout << "  \"q4_mode\": \"" << q4_execution_mode_name(args.q4_mode) << "\",\n";
       std::cout << "  \"execution_scope\": \"routed_moe_only\",\n";
       std::cout << "  \"input_schema\": \"hy3-routed-layer-parity-fixture-list\",\n";
       std::cout << "  \"input_validation\": \"shape_and_strictly_increasing_layers\",\n";
@@ -524,7 +528,7 @@ int main(int argc, char **argv) {
       int worst_rel_layer = -1;
       bool all_pass = true;
       for (const auto &fixture_path : fixture_paths) {
-        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root, args.layer_major);
+        ParityResult result = run_parity_fixture(fixture_path, entries, spans, args.root, args.layer_major, args.q4_mode);
         total_bytes += result.bytes_read;
         total_naive_bytes += result.naive_bytes_read;
         total_dedup_saved_bytes += result.dedup_saved_bytes;
@@ -550,6 +554,7 @@ int main(int argc, char **argv) {
       std::cout << "{\n";
       std::cout << "  \"ok\": true,\n";
       std::cout << "  \"mode\": \"" << (args.layer_major ? "parity-fixture-list-layer-major" : "parity-fixture-list") << "\",\n";
+      std::cout << "  \"q4_mode\": \"" << q4_execution_mode_name(args.q4_mode) << "\",\n";
       std::cout << "  \"fixture_list\": \"" << json_escape(args.fixture_list.string()) << "\",\n";
       std::cout << "  \"index\": \"" << json_escape(args.index.string()) << "\",\n";
       std::cout << "  \"root\": \"" << json_escape(args.root.string()) << "\",\n";

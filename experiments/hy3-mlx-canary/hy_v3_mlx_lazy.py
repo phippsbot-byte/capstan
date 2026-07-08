@@ -692,6 +692,13 @@ def parse_cpp_route_dense_cache_gib(raw: str) -> float:
     return value
 
 
+def parse_cpp_route_q4_mode(raw: str | None) -> str:
+    mode = (raw or "dense").strip().lower()
+    if mode not in {"dense", "direct", "hybrid"}:
+        raise ValueError(f"HY3_CPP_ROUTE_Q4_MODE must be dense, direct, or hybrid, got {raw!r}")
+    return mode
+
+
 class CppRouteMlpClient:
     """Persistent binary client for cpp/hy3_route_mlp_daemon.
 
@@ -713,6 +720,8 @@ class CppRouteMlpClient:
         if dense_cache_gib:
             self.dense_cache_gib = parse_cpp_route_dense_cache_gib(dense_cache_gib)
             cmd.extend(["--dense-cache-gib", f"{self.dense_cache_gib:g}"])
+        self.q4_mode = parse_cpp_route_q4_mode(os.environ.get("HY3_CPP_ROUTE_Q4_MODE"))
+        cmd.extend(["--q4-mode", self.q4_mode])
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -827,6 +836,7 @@ class CppRouteMlpClient:
             "compute_s": round(self.compute_s, 3),
             "dense_cache_gib": self.dense_cache_gib,
             "dense_expert_gib": round(CPP_ROUTE_DENSE_EXPERT_GIB, 6),
+            "q4_mode": self.q4_mode,
             "read_calls": self.read_calls,
             "read_gib": round(self.bytes_read / (1024 ** 3), 6),
         }

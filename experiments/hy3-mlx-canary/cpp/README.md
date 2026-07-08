@@ -273,5 +273,24 @@ fixtures (layers 1/40/79), the NEON direct-dot path is **2.6212x** median /
 included, while matching dense output with `max_rel_to_dense < 5e-7`. It is
 still only **0.4062x** median vs dense compute once dense weights are already
 hot. Verdict: validated for cold/prefill-shaped routes, not a universal
-replacement. A runtime cut should expose a `dense`/`direct`/eventual hybrid mode
-rather than swapping out the hot dense-cache path.
+replacement.
+
+Runtime q4 modes now exist in the C++ routed-MoE path via
+`--q4-mode dense|direct|hybrid`, and the Python daemon hook accepts
+`HY3_CPP_ROUTE_Q4_MODE`. Default remains `dense` for compatibility. `direct`
+uses the q4 affine dot path without dense FP32 materialization; `hybrid` uses
+`direct` for cold/low-reuse experts and dense+Accelerate once an expert appears
+in at least 8 routes in a fixture/request. Artifact:
+`cpp/results/20260708-hybrid-q4-summary.json`.
+
+| Shape | Dense | Direct | Hybrid | Verdict |
+|---|---:|---:|---:|---|
+| six-fixture spread | 2.085s | 1.182s | **1.131s** | all pass parity |
+| prefill4 route-exec, 79 layers | 18.573s | 10.178s | **9.405s** / **1.98x** | all pass parity |
+| prefill16 route-exec, 79 layers | 42.078s | 30.760s | **29.559s** / **1.42x** | all pass parity |
+| online `forward-one`, top-k1 C++ route hook | 1.450s | 0.902s | **0.895s** | next token `1655` |
+
+This is the first C++/Capstan Hy3 compute cut that is both runtime-shaped and a
+real speed win. Next useful move is to benchmark a less-approximate online lane
+(top-k5/top-k8 small prompt) and then decide whether to promote `hybrid` as the
+default C++ route mode for Hy3 canaries.
