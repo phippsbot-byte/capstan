@@ -210,7 +210,9 @@ Metal/SIMD kernels.
 routed-MoE math from Python. It keeps the compact index and sidecar file handles
 alive, speaks a local little-endian binary stdin/stdout protocol, and is wired
 behind `HY3_CPP_ROUTE_MLP=1` in `hy_v3_mlx_lazy.py`. Optional dense expert reuse
-is enabled with `HY3_CPP_ROUTE_DENSE_CACHE_GIB=<N>` / `--dense-cache-gib N`.
+is enabled with `HY3_CPP_ROUTE_DENSE_CACHE_GIB=<N>` / `--dense-cache-gib N`,
+validated as finite `0 <= N <= 16`; one dense expert bank is ~0.070GiB, so the
+documented `8` GiB setting can hold roughly 110 expert banks before LRU eviction.
 
 Smoke commands:
 

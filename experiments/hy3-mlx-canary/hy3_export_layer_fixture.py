@@ -68,6 +68,8 @@ def build_metadata(args: argparse.Namespace, ids: list[int], meta: dict[str, Any
         "resident_tensors": meta["resident_tensors"],
         "load_weight_s": round(meta["load_weight_s"], 3),
         "sidecar_store": mod.get_sidecar_store().stats(),
+        "execution_backend": "python_mlx",
+        "cpp_route_mlp_enabled": bool(getattr(mod, "cpp_route_mlp_enabled", lambda: False)()),
         "swap": {
             "start_gib": round(guard["start_gib"], 3),
             "last_gib": round(guard["last_gib"], 3),
@@ -95,6 +97,10 @@ def main() -> None:
     parser.add_argument("--max-swap-delta-gib", type=float, default=12.0)
     args = parser.parse_args()
 
+    # Parity fixtures are meant to compare native code against Python/MLX output.
+    # Never let an inherited daemon flag turn C++ output into its own oracle.
+    os.environ.pop("HY3_CPP_ROUTE_MLP", None)
+    os.environ.pop("HY3_CPP_ROUTE_DENSE_CACHE_GIB", None)
     os.environ["HY3_SIDECAR_LAYOUT"] = str(args.layout)
     os.environ["HY3_SLOT_BANK"] = str(args.slot_bank)
     os.environ["HY3_TOPK_CAP"] = str(args.topk_cap)

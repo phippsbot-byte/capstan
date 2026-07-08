@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +17,10 @@
 #include <unistd.h>
 
 namespace fs = std::filesystem;
+
+constexpr double kMaxDenseCacheGiB = 16.0;
+constexpr double kBytesPerGiB = 1024.0 * 1024.0 * 1024.0;
+constexpr size_t kDenseExpertBytes = static_cast<size_t>(3) * static_cast<size_t>(1536) * static_cast<size_t>(4096) * sizeof(float);
 
 struct Args {
   fs::path index;
@@ -63,7 +68,7 @@ static Args parse_args(int argc, char **argv) {
     else if (key == "--root") args.root = need("--root");
     else if (key == "--dense-cache-gib") args.dense_cache_gib = std::stod(need("--dense-cache-gib"));
     else if (key == "--help" || key == "-h") {
-      std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N]\n");
+      std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N<=16]\n");
       std::exit(0);
     } else {
       throw std::runtime_error("unknown arg: " + key);
@@ -71,7 +76,9 @@ static Args parse_args(int argc, char **argv) {
   }
   if (args.index.empty()) throw std::runtime_error("--index is required");
   if (args.root.empty()) throw std::runtime_error("--root is required");
-  if (args.dense_cache_gib < 0.0) throw std::runtime_error("--dense-cache-gib must be non-negative");
+  if (!std::isfinite(args.dense_cache_gib) || args.dense_cache_gib < 0.0 || args.dense_cache_gib > kMaxDenseCacheGiB) {
+    throw std::runtime_error("--dense-cache-gib must be finite and in [0, 16]");
+  }
   return args;
 }
 
@@ -296,9 +303,15 @@ int main(int argc, char **argv) {
     std::vector<Entry> entries = load_entries(args.index);
     auto spans = build_spans(entries);
     FdCache fds(args.root);
-    size_t dense_cache_bytes = static_cast<size_t>(args.dense_cache_gib * 1024.0 * 1024.0 * 1024.0);
+    size_t dense_cache_bytes = static_cast<size_t>(args.dense_cache_gib * kBytesPerGiB);
     DenseExpertCache dense_cache(dense_cache_bytes);
-    std::fprintf(stderr, "hy3_route_mlp_daemon ready entries=%zu spans=%zu dense_cache_gib=%.3f\n", entries.size(), spans.size(), args.dense_cache_gib);
+    std::fprintf(
+        stderr,
+        "hy3_route_mlp_daemon ready entries=%zu spans=%zu dense_cache_gib=%.3f dense_expert_gib=%.6f\n",
+        entries.size(),
+        spans.size(),
+        args.dense_cache_gib,
+        static_cast<double>(kDenseExpertBytes) / kBytesPerGiB);
     std::fflush(stderr);
 
     while (true) {

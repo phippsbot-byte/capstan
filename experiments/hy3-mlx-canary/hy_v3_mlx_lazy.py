@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import os
 import struct
 import subprocess
@@ -28,6 +29,11 @@ WORKDIR = Path(__file__).resolve().parent
 DEFAULT_CPP_ROUTE_DAEMON_BIN = str(WORKDIR / "build/hy3-sidecar-io/hy3_route_mlp_daemon")
 DEFAULT_CPP_ROUTE_INDEX = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv"
 DEFAULT_CPP_ROUTE_ROOT = "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar"
+CPP_ROUTE_MAX_SEQ = 4096
+CPP_ROUTE_MAX_TOPK = 64
+CPP_ROUTE_MAX_LAYER = 1000
+CPP_ROUTE_MAX_DENSE_CACHE_GIB = 16.0
+CPP_ROUTE_DENSE_EXPERT_GIB = (3 * 1536 * 4096 * 4) / (1024 ** 3)
 
 
 @dataclass
@@ -306,6 +312,7 @@ _MOE_TIMES: dict[str, float] = {
     "switch_s": 0.0,
     "weight_s": 0.0,
     "shared_s": 0.0,
+    "cpp_route_s": 0.0,
 }
 
 
@@ -441,6 +448,7 @@ def capture_parity_fixture(layer: int, x: mx.array, indices: mx.array, route_wei
     _PARITY_FIXTURES.append(
         {
             "schema": "hy3-routed-layer-parity-v2",
+            "execution_backend": "cpp_route_mlp" if cpp_route_mlp_enabled() else "python_mlx",
             "layer": layer,
             "batch": batch,
             "token": int(token_indices[0]),
@@ -535,6 +543,19 @@ def eval_for_timing(*arrays: Any) -> None:
         mx.synchronize()
 
 
+def parse_cpp_route_dense_cache_gib(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"HY3_CPP_ROUTE_DENSE_CACHE_GIB must be a number, got {raw!r}") from exc
+    if not math.isfinite(value) or value < 0.0 or value > CPP_ROUTE_MAX_DENSE_CACHE_GIB:
+        raise ValueError(
+            f"HY3_CPP_ROUTE_DENSE_CACHE_GIB must be finite and in [0, {CPP_ROUTE_MAX_DENSE_CACHE_GIB:g}], got {raw!r}; "
+            f"one dense expert bank is ~{CPP_ROUTE_DENSE_EXPERT_GIB:.3f}GiB"
+        )
+    return value
+
+
 class CppRouteMlpClient:
     """Persistent binary client for cpp/hy3_route_mlp_daemon.
 
@@ -552,19 +573,41 @@ class CppRouteMlpClient:
         root = os.environ.get("HY3_CPP_ROUTE_ROOT", DEFAULT_CPP_ROUTE_ROOT)
         cmd = [binary, "--index", index, "--root", root]
         dense_cache_gib = os.environ.get("HY3_CPP_ROUTE_DENSE_CACHE_GIB")
+        self.dense_cache_gib = 0.0
         if dense_cache_gib:
-            cmd.extend(["--dense-cache-gib", dense_cache_gib])
+            self.dense_cache_gib = parse_cpp_route_dense_cache_gib(dense_cache_gib)
+            cmd.extend(["--dense-cache-gib", f"{self.dense_cache_gib:g}"])
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        if self.proc.poll() is not None:
+            self._fail("C++ route daemon exited during startup")
         self.calls = 0
         self.wall_s = 0.0
         self.compute_s = 0.0
         self.read_calls = 0
         self.bytes_read = 0
+
+    def _stderr_excerpt(self) -> str:
+        if self.proc.stderr is None or self.proc.poll() is None:
+            return ""
+        try:
+            data = self.proc.stderr.read() or b""
+        except Exception:
+            return ""
+        text = data.decode("utf-8", "replace").strip()
+        return f"; daemon stderr: {text[-1000:]}" if text else ""
+
+    def _fail(self, message: str) -> None:
+        detail = self._stderr_excerpt()
+        self.close()
+        global _CPP_ROUTE_CLIENT
+        if _CPP_ROUTE_CLIENT is self:
+            _CPP_ROUTE_CLIENT = None
+        raise RuntimeError(message + detail)
 
     def close(self) -> None:
         proc = self.proc
@@ -582,7 +625,9 @@ class CppRouteMlpClient:
 
     def compute(self, layer: int, x: mx.array, indices: mx.array, route_weights: mx.array) -> mx.array:
         if self.proc.stdin is None or self.proc.stdout is None:
-            raise RuntimeError("C++ route daemon pipes are closed")
+            self._fail("C++ route daemon pipes are closed")
+        if self.proc.poll() is not None:
+            self._fail("C++ route daemon exited before request")
         mx.eval(x, indices, route_weights)
         x_np = np.ascontiguousarray(np.array(x.astype(mx.float32), copy=False), dtype=np.float32)
         idx_np = np.ascontiguousarray(np.array(indices, copy=False), dtype=np.int32)
@@ -596,6 +641,12 @@ class CppRouteMlpClient:
             raise ValueError(f"C++ route daemon shape mismatch x={x_np.shape} idx={idx_np.shape} weights={weight_np.shape}")
         topk = idx_np.shape[-1]
         flat_seq = batch * seq_len
+        if not (0 <= int(layer) <= CPP_ROUTE_MAX_LAYER):
+            raise ValueError(f"C++ route daemon layer out of range 0..{CPP_ROUTE_MAX_LAYER}: {layer}")
+        if flat_seq < 1 or flat_seq > CPP_ROUTE_MAX_SEQ:
+            raise ValueError(f"C++ route daemon supports flattened seq 1..{CPP_ROUTE_MAX_SEQ}, got batch*seq={flat_seq}")
+        if topk < 1 or topk > CPP_ROUTE_MAX_TOPK:
+            raise ValueError(f"C++ route daemon supports topk 1..{CPP_ROUTE_MAX_TOPK}, got {topk}")
         payload = (
             self.REQ.pack(b"HY3R", int(layer), int(flat_seq), int(topk), 0)
             + x_np.reshape(flat_seq, 4096).tobytes()
@@ -603,23 +654,26 @@ class CppRouteMlpClient:
             + weight_np.reshape(flat_seq, topk).tobytes()
         )
         t0 = time.time()
-        self.proc.stdin.write(payload)
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(payload)
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            self._fail(f"C++ route daemon write failed: {exc}")
         hdr = self.proc.stdout.read(self.RESP.size)
         if len(hdr) != self.RESP.size:
-            raise RuntimeError(f"C++ route daemon returned short response header ({len(hdr)} bytes)")
+            self._fail(f"C++ route daemon returned short response header ({len(hdr)} bytes)")
         magic, status, payload_floats, read_calls, _reserved, compute_s, bytes_read = self.RESP.unpack(hdr)
         if magic == b"HY3E" or status != 0:
             msg = self.proc.stdout.read(payload_floats).decode("utf-8", "replace") if payload_floats else "unknown daemon error"
-            raise RuntimeError(f"C++ route daemon error: {msg}")
+            self._fail(f"C++ route daemon error: {msg}")
         if magic != b"HY3O":
-            raise RuntimeError(f"C++ route daemon returned bad magic: {magic!r}")
+            self._fail(f"C++ route daemon returned bad magic: {magic!r}")
         expected = flat_seq * 4096
         if payload_floats != expected:
-            raise RuntimeError(f"C++ route daemon payload size mismatch: {payload_floats} != {expected}")
+            self._fail(f"C++ route daemon payload size mismatch: {payload_floats} != {expected}")
         raw = self.proc.stdout.read(payload_floats * 4)
         if len(raw) != payload_floats * 4:
-            raise RuntimeError("C++ route daemon returned short output payload")
+            self._fail("C++ route daemon returned short output payload")
         wall = time.time() - t0
         self.calls += 1
         self.wall_s += wall
@@ -635,6 +689,8 @@ class CppRouteMlpClient:
             "calls": self.calls,
             "wall_s": round(self.wall_s, 3),
             "compute_s": round(self.compute_s, 3),
+            "dense_cache_gib": self.dense_cache_gib,
+            "dense_expert_gib": round(CPP_ROUTE_DENSE_EXPERT_GIB, 6),
             "read_calls": self.read_calls,
             "read_gib": round(self.bytes_read / (1024 ** 3), 6),
         }
@@ -949,7 +1005,7 @@ class Hy3MoE(nn.Module):
         if cpp_route_mlp_enabled():
             y = get_cpp_route_client().compute(self.layer_idx, x, inds, selected_scores)
             eval_for_timing(y)
-            _MOE_TIMES["switch_s"] += time.time() - t
+            _MOE_TIMES["cpp_route_s"] += time.time() - t
         else:
             y = self.switch_mlp(x, inds)
             eval_for_timing(y)
