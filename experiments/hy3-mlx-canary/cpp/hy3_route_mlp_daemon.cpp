@@ -199,6 +199,10 @@ class DenseExpertCache {
     return *inserted->second.bank;
   }
 
+  bool contains(int layer, int expert) const {
+    return cache_.find(span_key(layer, expert)) != cache_.end();
+  }
+
   size_t entries() const { return cache_.size(); }
   uint64_t hits() const { return hits_; }
   uint64_t misses() const { return misses_; }
@@ -325,7 +329,10 @@ static ComputeResult compute_request(
   std::vector<float> route_outputs(static_cast<size_t>(seq_len) * static_cast<size_t>(topk) * 4096, 0.0f);
   std::vector<float> xvec, up, gate, swiglu_hidden, down, group_sums;
   for (int expert : unique_experts) {
-    const bool use_dense = use_dense_for_expert(q4_mode, route_counts[expert]);
+    const bool use_dense =
+        q4_mode == Q4ExecutionMode::Hybrid && dense_cache.contains(layer, expert)
+            ? true
+            : use_dense_for_expert(q4_mode, route_counts[expert]);
     std::unique_ptr<ExpertBank> raw_bank;
     const DenseExpertBank *dense_bank = nullptr;
     if (use_dense) {

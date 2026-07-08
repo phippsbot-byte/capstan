@@ -1,0 +1,106 @@
+{
+  "schema": "hy3-cpp-route-q4-generate-cache-benchmark-v1",
+  "date": "2026-07-08",
+  "prompt": "Write a concise benchmark note for Nate. Cover speed, memory pressure, correctness risk, and the next engineering step. Keep it blunt and specific.",
+  "rows": [
+    {
+      "topk": 5,
+      "mode": "dense",
+      "ok": true,
+      "prompt_tokens": 30,
+      "max_new_tokens": 4,
+      "generated_ids": [
+        286,
+        120029,
+        72520,
+        423
+      ],
+      "generated_text_clean": "\n\n<think>Got it",
+      "step_timings_s": [
+        67.998,
+        5.752,
+        5.409,
+        5.756
+      ],
+      "step_sum_s": 84.915,
+      "load_s": 1.976,
+      "cpp_calls": 316,
+      "cpp_compute_s": 81.159,
+      "cpp_wall_s": 81.294,
+      "read_calls": 5671,
+      "read_gib": 56.07312,
+      "dense_cache_gib": 16.0,
+      "q4_mode": "dense",
+      "swap_delta_gib": 0.0,
+      "same_tokens_as_dense": true
+    },
+    {
+      "topk": 5,
+      "mode": "direct",
+      "ok": true,
+      "prompt_tokens": 30,
+      "max_new_tokens": 4,
+      "generated_ids": [
+        286,
+        503,
+        45,
+        387
+      ],
+      "generated_text_clean": "\n\n**Nate",
+      "step_timings_s": [
+        47.136,
+        2.392,
+        2.432,
+        2.422
+      ],
+      "step_sum_s": 54.382,
+      "load_s": 3.046,
+      "cpp_calls": 316,
+      "cpp_compute_s": 52.326,
+      "cpp_wall_s": 52.445,
+      "read_calls": 5687,
+      "read_gib": 56.231323,
+      "dense_cache_gib": 16.0,
+      "q4_mode": "direct",
+      "swap_delta_gib": 0.0,
+      "same_tokens_as_dense": false,
+      "step_sum_speedup_vs_dense": 1.561454157625685,
+      "cpp_compute_speedup_vs_dense": 1.551026258456599,
+      "read_gib_delta_vs_dense": 0.15820300000000032
+    },
+    {
+      "topk": 5,
+      "mode": "hybrid",
+      "ok": true,
+      "prompt_tokens": 30,
+      "max_new_tokens": 4,
+      "generated_ids": [
+        185,
+        120029,
+        72520,
+        423
+      ],
+      "generated_text_clean": "\n<think>Got it",
+      "step_timings_s": [
+        44.886,
+        2.766,
+        2.374,
+        2.574
+      ],
+      "step_sum_s": 52.6,
+      "load_s": 2.257,
+      "cpp_calls": 316,
+      "cpp_compute_s": 50.033,
+      "cpp_wall_s": 50.16,
+      "read_calls": 5494,
+      "read_gib": 54.322998,
+      "dense_cache_gib": 16.0,
+      "q4_mode": "hybrid",
+      "swap_delta_gib": 0.0,
+      "same_tokens_as_dense": false,
+      "step_sum_speedup_vs_dense": 1.6143536121673006,
+      "cpp_compute_speedup_vs_dense": 1.6221094077908582,
+      "read_gib_delta_vs_dense": -1.7501220000000046
+    }
+  ]
+}

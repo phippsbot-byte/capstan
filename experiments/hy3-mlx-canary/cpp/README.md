@@ -280,7 +280,8 @@ Runtime q4 modes now exist in the C++ routed-MoE path via
 `HY3_CPP_ROUTE_Q4_MODE`. Default remains `dense` for compatibility. `direct`
 uses the q4 affine dot path without dense FP32 materialization; `hybrid` uses
 `direct` for cold/low-reuse experts and dense+Accelerate once an expert appears
-in at least 8 routes in a fixture/request. Artifact:
+in at least 8 routes in a fixture/request, and the daemon now also routes
+already-cached dense experts through the dense path. Artifact:
 `cpp/results/20260708-hybrid-q4-summary.json`.
 
 | Shape | Dense | Direct | Hybrid | Verdict |
@@ -295,7 +296,19 @@ in at least 8 routes in a fixture/request. Artifact:
 This is the first C++/Capstan Hy3 compute cut that is both runtime-shaped and a
 real speed win. Online top-k5/top-k8 one-token canaries confirm the cold-route
 benefit at less-toy fanout; artifact:
-`results/20260708-cpp-route-q4-online-topk-summary.json`. Do **not** flip the
-runtime default globally yet: one-token forward has little expert reuse, so it
-mostly proves cold/prefill behavior. The next promotion gate is multi-token
-`generate-cache` / hot-cache decode with top-k5 or top-k8.
+`results/20260708-cpp-route-q4-online-topk-summary.json`.
+
+Multi-token `generate-cache` with a 30-token prompt, 4 generated tokens,
+`HY3_CPP_ROUTE_DENSE_CACHE_GIB=16`, and the cache-aware daemon hybrid confirmed
+that the speed win survives decode-shaped execution, but token drift blocks
+promotion to default. Artifact:
+`results/20260708-cpp-route-q4-generate-cache-4tok-cache16-combined-summary.json`.
+
+| Generate-cache shape | Dense | Direct | Hybrid | Token verdict |
+|---|---:|---:|---:|---|
+| top-k5, 4 tokens | 84.915s | 54.382s / **1.56x** | **52.600s / 1.61x** | direct + hybrid drift |
+| top-k8, 4 tokens | 120.941s | 91.766s / **1.32x** | **82.670s / 1.46x** | direct matched, hybrid drift |
+
+Swap delta stayed **0.0GiB**. Dense remains the default. `hybrid` is an
+experimental cold/hot speed lane until logit-level parity/tolerance is measured
+or mixed dense/direct numerics are tightened enough to avoid argmax drift.

@@ -1,0 +1,226 @@
+{
+  "exact_pong": false,
+  "experiment": {
+    "retain_policy": "freq",
+    "slot_bank": 16,
+    "topk_cap": 5
+  },
+  "generated_ids": [
+    185,
+    120029,
+    72520,
+    423
+  ],
+  "generated_text": "\n<think>Got it",
+  "generated_text_clean": "\n<think>Got it",
+  "load_s": 2.257,
+  "max_new_tokens": 4,
+  "mode": "generate-cache",
+  "ok": true,
+  "profile": {
+    "attn_total_s": 0.771,
+    "cpp_route_mlp": {
+      "calls": 316,
+      "compute_s": 50.033,
+      "dense_cache_gib": 16.0,
+      "dense_expert_gib": 0.070312,
+      "enabled": true,
+      "q4_mode": "hybrid",
+      "read_calls": 5494,
+      "read_gib": 54.322998,
+      "wall_s": 50.16
+    },
+    "enabled": true,
+    "layers": 320,
+    "mlp_total_s": 51.447,
+    "moe_times": {
+      "cpp_route_s": 50.658,
+      "router_s": 0.185,
+      "selection_s": 0.207,
+      "shared_s": 0.35,
+      "switch_s": 0.0,
+      "weight_s": 0.0
+    },
+    "profiled_total_s": 52.553,
+    "residual_total_s": 0.1,
+    "routed_mlp_disabled": false,
+    "shared_mlp_disabled": false,
+    "sync_timers": true,
+    "top_attn_layers": [
+      {
+        "attn_s": 0.019,
+        "kind": "dense",
+        "layer": 0,
+        "mlp_s": 0.005,
+        "residual_s": 0.001,
+        "total_s": 0.025
+      },
+      {
+        "attn_s": 0.011,
+        "kind": "moe",
+        "layer": 59,
+        "mlp_s": 0.036,
+        "residual_s": 0.001,
+        "total_s": 0.049
+      },
+      {
+        "attn_s": 0.009,
+        "kind": "moe",
+        "layer": 41,
+        "mlp_s": 0.038,
+        "residual_s": 0.001,
+        "total_s": 0.049
+      },
+      {
+        "attn_s": 0.009,
+        "kind": "moe",
+        "layer": 60,
+        "mlp_s": 0.035,
+        "residual_s": 0.0,
+        "total_s": 0.045
+      },
+      {
+        "attn_s": 0.008,
+        "kind": "moe",
+        "layer": 40,
+        "mlp_s": 0.033,
+        "residual_s": 0.001,
+        "total_s": 0.042
+      },
+      {
+        "attn_s": 0.008,
+        "kind": "moe",
+        "layer": 42,
+        "mlp_s": 0.051,
+        "residual_s": 0.001,
+        "total_s": 0.061
+      },
+      {
+        "attn_s": 0.008,
+        "kind": "moe",
+        "layer": 43,
+        "mlp_s": 0.047,
+        "residual_s": 0.0,
+        "total_s": 0.056
+      },
+      {
+        "attn_s": 0.008,
+        "kind": "moe",
+        "layer": 44,
+        "mlp_s": 0.048,
+        "residual_s": 0.001,
+        "total_s": 0.058
+      }
+    ],
+    "top_mlp_layers": [
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 72,
+        "mlp_s": 0.756,
+        "residual_s": 0.0,
+        "total_s": 0.758
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 53,
+        "mlp_s": 0.74,
+        "residual_s": 0.0,
+        "total_s": 0.743
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 74,
+        "mlp_s": 0.734,
+        "residual_s": 0.0,
+        "total_s": 0.737
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 62,
+        "mlp_s": 0.732,
+        "residual_s": 0.0,
+        "total_s": 0.735
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 66,
+        "mlp_s": 0.728,
+        "residual_s": 0.0,
+        "total_s": 0.731
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 67,
+        "mlp_s": 0.727,
+        "residual_s": 0.0,
+        "total_s": 0.73
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 78,
+        "mlp_s": 0.715,
+        "residual_s": 0.0,
+        "total_s": 0.718
+      },
+      {
+        "attn_s": 0.002,
+        "kind": "moe",
+        "layer": 63,
+        "mlp_s": 0.71,
+        "residual_s": 0.0,
+        "total_s": 0.713
+      }
+    ]
+  },
+  "prompt": "Write a concise benchmark note for Nate. Cover speed, memory pressure, correctness risk, and the next engineering step. Keep it blunt and specific.",
+  "prompt_tokens": 30,
+  "resident_tensors": 2323,
+  "sidecar_store": {
+    "cached_experts": 0,
+    "evictions": 0,
+    "gc_calls": 0,
+    "gc_time_s": 0.0,
+    "get_calls": 0,
+    "hits": 0,
+    "layers_with_cache": 0,
+    "layout_path": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json",
+    "load_time_s": 0.0,
+    "loads": 0,
+    "pack_time_s": 0.0,
+    "packed_batch_loads": 0,
+    "packed_coalesce_max_gib": 0.032,
+    "packed_coalesce_max_overread_ratio": 2.0,
+    "packed_coalesced_extra_gib": 0.0,
+    "packed_multi_expert_experts": 0,
+    "packed_multi_expert_groups": 0,
+    "packed_read_experts": 0,
+    "packed_read_groups": 0,
+    "qmm_time_s": 0.0,
+    "read_calls": 0,
+    "read_gib": 0.0,
+    "remap_time_s": 0.0,
+    "requested_unique_max": 0,
+    "requested_unique_total": 0,
+    "schema": "hy3-packed-sidecar-v1",
+    "slot_bank": 16
+  },
+  "step_timings_s": [
+    44.886,
+    2.766,
+    2.374,
+    2.574
+  ],
+  "swap": {
+    "delta_gib": 0.0,
+    "last_gib": 1.622,
+    "max_gib": 1.622,
+    "start_gib": 1.622
+  }
+}
