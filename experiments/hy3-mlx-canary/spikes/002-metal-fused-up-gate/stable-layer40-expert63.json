@@ -1,46 +1,55 @@
 {
-  "expert": 63,
-  "full_expert_speedup_vs_gather_median": 1.0181,
-  "fused_metal_swiglu_s": {
-    "max": 0.067173,
-    "mean": 0.004161,
-    "median": 0.000826,
-    "min": 0.000275
+  "all_metal_full_expert_s": {
+    "max": 0.028064,
+    "mean": 0.004355,
+    "median": 0.00099,
+    "min": 0.000387
   },
-  "fused_speedup_vs_gather_median": 1.1029,
-  "fused_speedup_vs_separate_metal_median": 1.1525,
+  "all_metal_full_expert_speedup_vs_gather_median": 1.0859,
+  "expert": 63,
+  "full_expert_speedup_vs_gather_median": 1.1328,
+  "fused_metal_swiglu_s": {
+    "max": 0.02416,
+    "mean": 0.003922,
+    "median": 0.000903,
+    "min": 0.000288
+  },
+  "fused_speedup_vs_gather_median": 1.1063,
+  "fused_speedup_vs_separate_metal_median": 1.1019,
   "fused_up_gate_plus_gather_down_full_expert_s": {
-    "max": 0.115359,
-    "mean": 0.004693,
-    "median": 0.000939,
-    "min": 0.00033
+    "max": 0.141196,
+    "mean": 0.004951,
+    "median": 0.000949,
+    "min": 0.000346
   },
   "gather_qmm_full_expert_s": {
-    "max": 0.058042,
-    "mean": 0.004473,
-    "median": 0.000956,
-    "min": 0.000362
+    "max": 0.025752,
+    "mean": 0.004104,
+    "median": 0.001075,
+    "min": 0.000383
   },
   "gather_qmm_swiglu_s": {
-    "max": 0.077173,
-    "mean": 0.004632,
-    "median": 0.000911,
-    "min": 0.000318
+    "max": 0.030684,
+    "mean": 0.00416,
+    "median": 0.000999,
+    "min": 0.000336
   },
   "layer": 40,
+  "max_abs_diff_all_metal_full_vs_gather_full": 0.16657638549804688,
   "max_abs_diff_fused_full_vs_gather_full": 0.125,
   "max_abs_diff_fused_vs_gather_swiglu": 0.3106565475463867,
   "max_abs_diff_separate_metal_vs_gather_swiglu": 0.3106565475463867,
+  "mean_abs_diff_all_metal_full_vs_gather_full": 0.024390604346990585,
   "mean_abs_diff_fused_full_vs_gather_full": 0.023228095844388008,
   "mean_abs_diff_fused_vs_gather_swiglu": 0.012440760619938374,
   "mean_abs_diff_separate_metal_vs_gather_swiglu": 0.012440760619938374,
   "ok": true,
   "schema": "hy3-metal-fused-up-gate-probe-v1",
   "separate_metal_swiglu_s": {
-    "max": 0.051657,
-    "mean": 0.004344,
-    "median": 0.000952,
-    "min": 0.000348
+    "max": 0.032272,
+    "mean": 0.004638,
+    "median": 0.000995,
+    "min": 0.000364
   },
   "shape": {
     "down": {
@@ -66,7 +75,7 @@
     "hits": 0,
     "layers_with_cache": 1,
     "layout_path": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json",
-    "load_time_s": 0.007,
+    "load_time_s": 0.004,
     "loads": 1,
     "pack_time_s": 0.0,
     "packed_batch_loads": 1,

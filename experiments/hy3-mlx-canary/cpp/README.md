@@ -243,10 +243,13 @@ SGEMM. Next serious speed work needs fused/on-the-fly q4 Metal or a kernel that
 avoids dense FP32 materialization and small-M SGEMM overhead.
 
 The next Metal spike at `../spikes/002-metal-fused-up-gate/` partially validates
-that direction. A fused q4 `up_proj + gate_proj + swiglu` Metal kernel beat
-`gather_qmm(up/gate)+swiglu` across six stable samples: **1.0819x** median
-speedup, **1.0343x** minimum. But the full expert proxy, with normal
-`gather_qmm(down)` after the fused hidden, only reached **1.0536x** median /
-**1.0736x** mean and had one slight regression (**0.9832x**). Treat up+gate-only
-fusion as a direction proof, not a runtime cut; the next kernel needs to fuse
-more of the route (`down` and/or route weighting).
+that direction, but still does not produce a runtime cut. Fused q4
+`up_proj + gate_proj + swiglu` is directionally real but modest/noisy:
+**1.0658x** median speedup vs `gather_qmm(up/gate)+swiglu`, with one stable
+sample regressing to **0.9138x**. The best full expert proxy was fused up+gate
+plus normal `gather_qmm(down)`: **1.1245x** median / **1.1726x** mean. Replacing
+down with a custom Metal row-reduce projection did **not** help; all-Metal full
+expert reached only **1.0505x** median and was slower than keeping MLX down.
+Treat this as a direction proof, not a runtime cut; the next kernel needs to
+fuse down/route weighting into the same launch or batch many routes without
+dense FP32 materialization.

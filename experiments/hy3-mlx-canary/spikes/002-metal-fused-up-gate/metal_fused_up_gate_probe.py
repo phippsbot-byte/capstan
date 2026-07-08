@@ -67,19 +67,19 @@ def summarize(vals: list[float]) -> dict[str, float]:
     }
 
 
-def build_single_projection_kernel(name: str):
+def build_single_projection_kernel(name: str, out_dim: int, in_dim: int, packed_words: int, groups: int):
     source = f"""
         uint row = threadgroup_position_in_grid.x;
         uint tid = thread_position_in_threadgroup.x;
         threadgroup float partial[{THREADS}];
         float acc = 0.0f;
-        if (row < {OUT_DIM}u) {{
-            for (uint i = tid; i < {IN_DIM}u; i += {THREADS}u) {{
-                uint word = w[row * {PACKED_WORDS}u + (i >> 3)];
+        if (row < {out_dim}u) {{
+            for (uint i = tid; i < {in_dim}u; i += {THREADS}u) {{
+                uint word = w[row * {packed_words}u + (i >> 3)];
                 uint q = (word >> ((i & 7u) * 4u)) & 0xFu;
                 uint group = i >> 6;
-                float scale = scales[row * {GROUPS}u + group];
-                float bias = biases[row * {GROUPS}u + group];
+                float scale = scales[row * {groups}u + group];
+                float bias = biases[row * {groups}u + group];
                 acc += x[i] * (float(q) * scale + bias);
             }}
         }}
@@ -89,10 +89,10 @@ def build_single_projection_kernel(name: str):
             if (tid < stride) partial[tid] += partial[tid + stride];
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }}
-        if (tid == 0u && row < {OUT_DIM}u) out[row] = partial[0];
+        if (tid == 0u && row < {out_dim}u) out[row] = partial[0];
     """
     return mx.fast.metal_kernel(
-        name=f"hy3_single_q4_{name}_{OUT_DIM}_{IN_DIM}_{THREADS}",
+        name=f"hy3_single_q4_{name}_{out_dim}_{in_dim}_{THREADS}",
         input_names=["x", "w", "scales", "biases"],
         output_names=["out"],
         source=source,
@@ -210,8 +210,9 @@ def main() -> None:
     }
     sync(x, xq, idx, up_packed, gate_packed, down_packed)
 
-    single_up_kernel = build_single_projection_kernel("up")
-    single_gate_kernel = build_single_projection_kernel("gate")
+    single_up_kernel = build_single_projection_kernel("up", OUT_DIM, IN_DIM, PACKED_WORDS, GROUPS)
+    single_gate_kernel = build_single_projection_kernel("gate", OUT_DIM, IN_DIM, PACKED_WORDS, GROUPS)
+    single_down_kernel = build_single_projection_kernel("down", DOWN_OUT_DIM, DOWN_IN_DIM, DOWN_PACKED_WORDS, DOWN_GROUPS)
     fused_kernel = build_fused_up_gate_kernel()
 
     def single_up_call() -> mx.array:
@@ -255,26 +256,41 @@ def main() -> None:
         hiddenq = mx.expand_dims(mx.expand_dims(mx.expand_dims(hidden.astype(mx.bfloat16), 0), 0), 0)
         return qlinear_gather_prepacked(hiddenq, idx, down_packed, DOWN_OUT_DIM)
 
+    def down_metal_from_hidden(hidden: mx.array) -> mx.array:
+        return single_down_kernel(
+            inputs=[hidden, down_w, down_scales, down_biases],
+            output_shapes=[(DOWN_OUT_DIM,)],
+            output_dtypes=[mx.float32],
+            grid=(DOWN_OUT_DIM * THREADS, 1, 1),
+            threadgroup=(THREADS, 1, 1),
+        )[0]
+
     def gather_full_expert_call() -> mx.array:
         return down_from_hidden(gather_swiglu_call())
 
     def fused_full_expert_call() -> mx.array:
         return down_from_hidden(fused_metal_call())
 
+    def all_metal_full_expert_call() -> mx.array:
+        return down_metal_from_hidden(fused_metal_call())
+
     gather_out = gather_swiglu_call()
     separate_out = separate_metal_call()
     fused_out = fused_metal_call()
     gather_full_out = gather_full_expert_call()
     fused_full_out = fused_full_expert_call()
-    sync(gather_out, separate_out, fused_out, gather_full_out, fused_full_out)
+    all_metal_full_out = all_metal_full_expert_call()
+    sync(gather_out, separate_out, fused_out, gather_full_out, fused_full_out, all_metal_full_out)
     gather_np = np.array(gather_out, copy=False)
     separate_np = np.array(separate_out, copy=False)
     fused_np = np.array(fused_out, copy=False)
     gather_full_np = np.array(gather_full_out, copy=False)
     fused_full_np = np.array(fused_full_out, copy=False)
+    all_metal_full_np = np.array(all_metal_full_out, copy=False)
     diff_fused = np.abs(fused_np - gather_np)
     diff_separate = np.abs(separate_np - gather_np)
     diff_full = np.abs(fused_full_np - gather_full_np)
+    diff_all_metal_full = np.abs(all_metal_full_np - gather_full_np)
 
     for _ in range(args.warmup):
         sync(gather_swiglu_call())
@@ -282,12 +298,14 @@ def main() -> None:
         sync(fused_metal_call())
         sync(gather_full_expert_call())
         sync(fused_full_expert_call())
+        sync(all_metal_full_expert_call())
 
     gather_times: list[float] = []
     separate_times: list[float] = []
     fused_times: list[float] = []
     gather_full_times: list[float] = []
     fused_full_times: list[float] = []
+    all_metal_full_times: list[float] = []
     for _ in range(args.repeat):
         dt, _ = timed(gather_swiglu_call)
         gather_times.append(dt)
@@ -299,12 +317,15 @@ def main() -> None:
         gather_full_times.append(dt)
         dt, _ = timed(fused_full_expert_call)
         fused_full_times.append(dt)
+        dt, _ = timed(all_metal_full_expert_call)
+        all_metal_full_times.append(dt)
 
     gather_summary = summarize(gather_times)
     separate_summary = summarize(separate_times)
     fused_summary = summarize(fused_times)
     gather_full_summary = summarize(gather_full_times)
     fused_full_summary = summarize(fused_full_times)
+    all_metal_full_summary = summarize(all_metal_full_times)
     result = {
         "ok": True,
         "schema": "hy3-metal-fused-up-gate-probe-v1",
@@ -321,14 +342,18 @@ def main() -> None:
         "mean_abs_diff_separate_metal_vs_gather_swiglu": float(diff_separate.mean()),
         "max_abs_diff_fused_full_vs_gather_full": float(diff_full.max()),
         "mean_abs_diff_fused_full_vs_gather_full": float(diff_full.mean()),
+        "max_abs_diff_all_metal_full_vs_gather_full": float(diff_all_metal_full.max()),
+        "mean_abs_diff_all_metal_full_vs_gather_full": float(diff_all_metal_full.mean()),
         "gather_qmm_swiglu_s": gather_summary,
         "separate_metal_swiglu_s": separate_summary,
         "fused_metal_swiglu_s": fused_summary,
         "gather_qmm_full_expert_s": gather_full_summary,
         "fused_up_gate_plus_gather_down_full_expert_s": fused_full_summary,
+        "all_metal_full_expert_s": all_metal_full_summary,
         "fused_speedup_vs_gather_median": round(gather_summary["median"] / max(fused_summary["median"], 1e-12), 4),
         "fused_speedup_vs_separate_metal_median": round(separate_summary["median"] / max(fused_summary["median"], 1e-12), 4),
         "full_expert_speedup_vs_gather_median": round(gather_full_summary["median"] / max(fused_full_summary["median"], 1e-12), 4),
+        "all_metal_full_expert_speedup_vs_gather_median": round(gather_full_summary["median"] / max(all_metal_full_summary["median"], 1e-12), 4),
         "sidecar_store": store.stats(),
     }
     text = json.dumps(result, indent=2, sort_keys=True)
