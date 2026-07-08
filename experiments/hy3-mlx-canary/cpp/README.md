@@ -253,3 +253,14 @@ expert reached only **1.0505x** median and was slower than keeping MLX down.
 Treat this as a direction proof, not a runtime cut; the next kernel needs to
 fuse down/route weighting into the same launch or batch many routes without
 dense FP32 materialization.
+
+A follow-up route-batched Metal spike at
+`../spikes/003-metal-route-batched-up-gate/` tested the real routed shape for
+six fixtures (seq4/seq16 × layers 1/40/79): one Metal launch emits weighted
+`swiglu(gate_q4(x), up_q4(x))` for all selected routes, then MLX handles down.
+Preweighting routes before down was basically neutral under MLX (**0.9949x**
+median vs standard), but the custom row-reduce route kernel was much slower:
+weighted hidden **0.4708x** median vs `gather_qmm`, full route proxy **0.5227x**
+median vs standard. Do not build one-threadgroup-per-route/output-row kernels;
+next serious path needs tiled/simdgroup q4 dot, MPS-backed batch matmul, or a
+deeper fused route kernel.
