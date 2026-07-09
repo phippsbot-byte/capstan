@@ -67,11 +67,11 @@ Capstan should orchestrate those systems, not rebuild them.
 | Active research | draft PR #15, 37 commits ahead of `main` |
 | Release tests | 49 Python tests; package builds on macOS/Python 3.11 |
 | Research tests | 2 CTests plus real sidecar smokes on PR #15 |
-| Installed CLI | editable `local-modelctl 0.24.3`; `capstan` and compatibility `modelctl` both work |
+| Installed CLI | editable `local-modelctl 0.24.3` sourced from the active Hy3 draft checkout; `capstan` and compatibility `modelctl` both work |
 | Live fleet | 1 ready lane, 2 explicitly dormant lanes |
 | Fleet doctor | clean: 0 issues, 0 warnings |
 | Live service drift | DS4 LaunchAgent matches desired manifest |
-| Live DS4 health | exact JSON smoke passes; swap delta 0.0 GiB |
+| Live DS4 health | explicit exact JSON smoke passes; swap delta 0.0 GiB; routine health does not enable semantic smoke or latency ceilings |
 | DS4 smoke performance | 15.44s wall for 17 prompt + 6 completion tokens; ~1.15 prompt tok/s and ~8.33 completion tok/s |
 | Saved report history | only 1 report, dated 2026-06-15 |
 | GitHub adoption, checked 2026-07-09 | 0 issues, 0 stars, 0 forks |
@@ -151,30 +151,39 @@ Verdict: **do not merge PR #15 into `main` in its current form.** Preserve it as
 1. **Start/recovery/cleanup safety**
    - preflight is optional and is not enforced by ordinary `start`, fleet recovery, or daemon restart;
    - `start --wait` can return shell success when readiness fails;
+   - cleanup parses `safe = "false"` as truthy because manifest booleans are loosely coerced; a temporary-file deletion was reproduced without `--force`;
    - cleanup has a manifest-declared safety flag, but no canonical-root containment, protected-path rules, symlink-race defense, or active-model check.
 
-2. **Provenance**
+2. **Supervisor policy and observability**
+   - routine semantic health/latency gates are not enabled for DS4, so green does not mean usable;
+   - the daemon does not emit incremental durable health/restart events during its long-running loop;
+   - restart can trigger on any non-`ok` verdict, including warnings based on machine-global swap, with no attribution, hysteresis, cooldown, or retry budget;
+   - service drift checks require the operator to remember install-time flags instead of reading manifest-owned policy;
+   - fleet service state does not expose loaded/running state, service PID, last exit, or restart history.
+
+3. **Provenance**
    - no model source/revision/hash fields;
    - no runtime repo/commit/version/binary fingerprint;
    - no automatic hardware/OS snapshot;
    - no manifest digest embedded in runs.
+   - the live CLI/service imports an editable draft checkout, and the DS4 launch script lives outside Git.
 
-3. **Durable run receipts**
+4. **Durable run receipts**
    - smoke/soak/bench results are not automatically saved into one canonical run store;
    - the live report store has one stale report despite extensive experimentation;
    - experiment artifacts use bespoke schemas and paths.
 
-4. **Comparison and policy gates**
+5. **Comparison and policy gates**
    - no incumbent-vs-candidate comparison command;
    - no reusable latency, throughput, memory, correctness, quality, or regression policy;
    - no explicit promote/archive/reject result.
 
-5. **Promotion semantics**
+6. **Promotion semantics**
    - current `promote` is safe deployment rotation with post-health rollback;
    - it does not prove the candidate beat the incumbent;
    - it does not persist a promotion receipt or canonical incumbent pointer.
 
-6. **Research integration**
+7. **Research integration**
    - model-specific experiments do not emit Capstan-native receipts;
    - no adapter contract for custom metrics such as expert reads, cache hits, parity error, or quality evaluator output;
    - raw experiment artifacts overwhelm the branch.
@@ -189,6 +198,8 @@ Verdict: **do not merge PR #15 into `main` in its current form.** Preserve it as
 - no remote fleet/peer model yet;
 - no external user validation;
 - no automatic runtime update/version drift detection.
+- `main` has no branch protection/ruleset, vulnerability alerts are disabled, and stale merged branches remain;
+- PyPI publication has never run; `local-modelctl` is absent and the `capstan` package name belongs to another project.
 
 ## Competitive reality
 
@@ -212,7 +223,7 @@ Verdict: **do not merge PR #15 into `main` in its current form.** Preserve it as
 
 Stop optimizing Hy3 for one sprint.
 
-First ship a narrow **v0.24.4 Safety Gate**: enforce preflight before every start/recovery path, make readiness failure return non-zero, and harden cleanup path containment/in-use checks.
+First ship a narrow **v0.24.4 Safety Gate**: enforce preflight before every start/recovery path, make command exit status match structured failures, strictly validate manifests, harden cleanup path containment/in-use checks, and make restart policy attributable and bounded.
 
 Then build **Capstan v0.25: Evidence Spine** on `main`:
 

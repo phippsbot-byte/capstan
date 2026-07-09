@@ -41,12 +41,17 @@ Ship this before the evidence work.
 ### Actions
 
 - [ ] Centralize preflight enforcement before ordinary `start`, executed fleet recovery, daemon-triggered restart, rotate target start, rotate rollback, and promotion rollback.
-- [ ] Make `start --wait` return non-zero when readiness fails.
+- [ ] Make `start --wait`, failed stop, recovery, rotate, rollback, and other action commands return non-zero whenever their structured result says the action/readiness failed.
 - [ ] Preserve a narrowly scoped stable-port exception only for the target behind the same readiness-gated rotate/promote deployment identity; all other preflight checks still apply to target and rollback starts.
 - [ ] Reject malformed/loosely coerced manifest booleans, negative/non-finite limits, and incompatible fields.
 - [ ] Replace cleanup's trusted `safe = true` behavior with canonical-root containment, protected-path rules, symlink-safe deletion, and active-manifest/PID checks.
 - [ ] Keep `--force` explicit, but do not let it delete protected system, home, or active-model roots without a separate exact-path confirmation contract.
 - [ ] Gate release-asset and PyPI publication on the same passing test/build job.
+- [ ] Separate cheap liveness from semantic health cadence; restart only on declared critical failures, never generic warnings.
+- [ ] Add restart hysteresis, cooldown, retry budget, and attribution so unrelated machine-global swap cannot blindly bounce a healthy model.
+- [ ] Emit breach/restart/recovery events incrementally to a bounded owner-only event log instead of retaining the daemon's history only in memory.
+- [ ] Make service interval/restart/health policy manifest-owned so plain `service diff` is authoritative without remembered install flags.
+- [ ] Detect configured legacy/custom LaunchAgent labels and flag unsafe non-loopback binds, including unloaded orphan services.
 
 ### Exit gate
 
@@ -197,6 +202,7 @@ It should answer why the model is live and point to the promotion receipt.
 - [ ] Tests are split into focused modules rather than growing one giant test file.
 - [ ] CI covers Python 3.11 and 3.12; macOS remains the service-integration lane.
 - [ ] Release-asset and PyPI publication jobs depend on a passing test/build gate instead of publishing independently.
+- [ ] Supervisor incident/state receipts are backed by the incremental bounded event log from v0.24.4.
 
 ## Phase 2 — connect the lab to the product
 
@@ -310,6 +316,7 @@ Only after receipts/comparison work.
 
 ### High-value additions
 
+- concise `capstan overview` table: intent, loaded state, PID/port owner, readiness, last semantic smoke, prompt/decode latency, swap delta, drift, runtime version, and last event;
 - remote/peer fleet inventory for Studio + Mini;
 - runtime version drift detection;
 - service/manifest/run-history API;
@@ -335,13 +342,14 @@ After v0.25 evidence work is stable:
 - [ ] Keep `modelctl` console/state/env compatibility for at least one major release.
 - [ ] Move implementation modules toward `capstan.*` incrementally.
 - [ ] Add GitHub topics, a roadmap, and issue templates.
+- [ ] Protect `main` with required CI, enable vulnerability alerts, and prune merged remote branches.
 - [ ] Publish one opinionated tutorial: “Promote a 100B+ custom local model without bricking your Mac.”
 - [ ] Ask 3–5 serious local-model operators to try the lifecycle, not the Hy3 runtime.
 
 ## v1.0 definition of done
 
-- [ ] Three heterogeneous giant-model manifests work without core special cases.
-- [ ] Two runtimes are real, not synthetic.
+- [ ] Three heterogeneous giant-model deployments work without core special cases: stock llama.cpp, MLX/MLX-LM, and one custom sidecar/out-of-core runtime.
+- [ ] At least two current frontier model families are real, not synthetic.
 - [ ] Every explicit run has provenance and a content-addressed, tamper-evident receipt.
 - [ ] Candidate comparison has blocked at least one known regression.
 - [ ] Promotion and rollback have been exercised live.
@@ -350,6 +358,8 @@ After v0.25 evidence work is stable:
 - [ ] One fresh machine can reproduce a lane from docs plus declared external artifacts.
 - [ ] No destructive command is implicit.
 - [ ] Raw lab artifacts are outside the core Git history.
+- [ ] A seven-day soak proves bounded logs, bounded restarts, and no unmanaged swap runaway.
+- [ ] Two external operators reproduce a supported deployment on clean machines without founder intervention, excluding artifact download time.
 
 ## Success metrics for the next 90 days
 
@@ -370,11 +380,22 @@ Reassess Capstan if any of these remain true after v0.25/v0.26:
 4. Operators still need shell archaeology to answer what is live and why.
 5. We keep producing bespoke benchmark files that cannot be compared.
 
+## Conditional 6–12 month product proof
+
+If Capstan is pursued as a standalone product rather than internal/open-source infrastructure, require:
+
+- five retained weekly external operators;
+- three multi-host deployments;
+- two paid design partners or appliance/integration pilots;
+- at least one supported deployment reproduced without founder intervention.
+
+If those signals do not exist by month 12, keep Capstan as focused internal/open-source infrastructure. Do not build enterprise-control-plane cosplay around a single operator.
+
 ## Exact next ten actions
 
 1. Keep PR #15 Draft and label it lab-only.
 2. Open and ship a focused `v0.24.4-safety-gate` branch from `main`.
-3. Enforce preflight/readiness exit semantics and cleanup path containment.
+3. Enforce strict manifests, centralized preflight, truthful action exit codes, cleanup containment, and bounded restart policy.
 4. Gate release publication on tests.
 5. Open `v0.25-evidence-spine` from the hardened mainline.
 6. Add backward-compatible provenance and artifact-lock sections.
