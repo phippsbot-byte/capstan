@@ -1,0 +1,68 @@
+{
+  "schema": "hy3-cpp-route-packed-cache-benchmark-v1",
+  "date": "2026-07-09",
+  "prompt": "Write a concise benchmark note for Nate. Cover speed, memory pressure, correctness risk, and the next engineering step. Keep it blunt and specific.",
+  "shape": {
+    "q4_mode": "direct",
+    "topk": 8,
+    "prompt_tokens": 30,
+    "max_new_tokens": 4,
+    "packed_cache_gib": 16
+  },
+  "baseline": {
+    "artifact": "20260708-cpp-route-q4-direct-generate-cache-topk8-4tok-cache16.json",
+    "generated_ids": [185, 120029, 72520, 423],
+    "step_timings_s": [79.777, 4.104, 3.941, 3.944],
+    "step_sum_s": 91.766,
+    "decode_median_s": 3.944,
+    "cpp_compute_s": 89.286,
+    "read_gib": 82.048096,
+    "swap_delta_gib": 0.0
+  },
+  "global_lru": {
+    "artifact": "20260709-cpp-route-q4-direct-packedcache16-topk8-4tok.json",
+    "generated_ids": [185, 120029, 72520, 423],
+    "same_ids_as_baseline": true,
+    "step_timings_s": [73.242, 3.247, 2.815, 2.994],
+    "step_sum_s": 82.298,
+    "step_sum_reduction_pct": 10.317547,
+    "decode_median_s": 2.994,
+    "decode_median_reduction_pct": 24.087221,
+    "cpp_compute_s": 80.431,
+    "cpp_compute_reduction_pct": 9.917568,
+    "packed_cache_hits": 663,
+    "read_gib": 75.492554,
+    "read_reduction_pct": 7.989877,
+    "swap_delta_gib": 0.0
+  },
+  "rejected_layer_sharded_lru": {
+    "artifact": "20260709-cpp-route-q4-direct-packedcache16-layer-sharded-topk8-4tok.json",
+    "generated_ids": [185, 120029, 72520, 423],
+    "same_ids_as_baseline": true,
+    "step_timings_s": [72.569, 3.253, 2.848, 2.996],
+    "step_sum_s": 81.666,
+    "decode_median_s": 2.996,
+    "packed_cache_hits": 659,
+    "read_gib": 75.532104,
+    "swap_delta_gib": 0.0,
+    "verdict": "No material hit/read benefit over the simpler global LRU; not retained in runtime code."
+  },
+  "repeated_request_gate": {
+    "artifact": "20260709-cpp-route-packed-cache-repeat-smoke.json",
+    "fixture": "cpp/fixtures/hy3-layer1-top5-bos.json",
+    "first_read_calls": 5,
+    "first_bytes_read": 53084160,
+    "second_read_calls": 0,
+    "second_bytes_read": 0,
+    "second_cache_hits": 5,
+    "byte_identical_outputs": true,
+    "output_sha256": "5fd81ce6cb37a7475df165b7436bebbbd9774bfc30334fd1c1a92965370e36af"
+  },
+  "verdict": {
+    "ship": "Keep the bounded global packed ExpertBank LRU as an opt-in direct/hybrid decode optimization.",
+    "default": "Off. Dense remains the default q4 mode and packed cache defaults to 0 GiB.",
+    "correctness": "Cache-on preserved the exact four greedy token ids and repeated identical daemon requests were byte-identical.",
+    "performance": "Passed the decode gate with 24.1% lower median decode step and improved total step wall by 10.3%. Aggregate read reduction was 8.0%, below the initial 15% estimate because prompt-prefill route overlap is limited.",
+    "memory": "Swap delta remained 0.0 GiB and dense+packed cache budgets are jointly capped at 16 GiB."
+  }
+}

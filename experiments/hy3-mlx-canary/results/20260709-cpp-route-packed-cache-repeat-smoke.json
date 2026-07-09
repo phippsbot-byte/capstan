@@ -1,0 +1,28 @@
+{
+  "byte_identical_outputs": true,
+  "daemon": "/tmp/capstan-hy3-cache-reviewfix/hy3_route_mlp_daemon",
+  "failures": [],
+  "first": {
+    "bytes_read": 53084160,
+    "cache_hits": 0,
+    "compute_s": 0.019347416,
+    "read_calls": 5
+  },
+  "fixture": "experiments/hy3-mlx-canary/cpp/fixtures/hy3-layer1-top5-bos.json",
+  "index": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/compact-index.tsv",
+  "layer": 1,
+  "output_sha256": "5fd81ce6cb37a7475df165b7436bebbbd9774bfc30334fd1c1a92965370e36af",
+  "packed_cache_gib": 0.1,
+  "root": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar",
+  "schema": "hy3-packed-expert-cache-repeat-smoke-v1",
+  "second": {
+    "bytes_read": 0,
+    "cache_hits": 5,
+    "compute_s": 0.013537541,
+    "read_calls": 0
+  },
+  "seq_len": 1,
+  "status": "PASS",
+  "topk": 5,
+  "unique_experts": 5
+}

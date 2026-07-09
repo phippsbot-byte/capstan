@@ -33,7 +33,10 @@ CPP_ROUTE_MAX_SEQ = 4096
 CPP_ROUTE_MAX_TOPK = 64
 CPP_ROUTE_MAX_LAYER = 1000
 CPP_ROUTE_MAX_DENSE_CACHE_GIB = 16.0
+CPP_ROUTE_MAX_PACKED_CACHE_GIB = 16.0
+CPP_ROUTE_MAX_COMBINED_CACHE_GIB = 16.0
 CPP_ROUTE_DENSE_EXPERT_GIB = (3 * 1536 * 4096 * 4) / (1024 ** 3)
+CPP_ROUTE_PACKED_EXPERT_GIB = 10_616_832 / (1024 ** 3)
 
 
 @dataclass
@@ -692,6 +695,19 @@ def parse_cpp_route_dense_cache_gib(raw: str) -> float:
     return value
 
 
+def parse_cpp_route_packed_cache_gib(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"HY3_CPP_ROUTE_PACKED_CACHE_GIB must be a number, got {raw!r}") from exc
+    if not math.isfinite(value) or value < 0.0 or value > CPP_ROUTE_MAX_PACKED_CACHE_GIB:
+        raise ValueError(
+            f"HY3_CPP_ROUTE_PACKED_CACHE_GIB must be finite and in [0, {CPP_ROUTE_MAX_PACKED_CACHE_GIB:g}], got {raw!r}; "
+            f"one packed expert bank is ~{CPP_ROUTE_PACKED_EXPERT_GIB:.3f}GiB"
+        )
+    return value
+
+
 def parse_cpp_route_q4_mode(raw: str | None) -> str:
     mode = (raw or "dense").strip().lower()
     if mode not in {"dense", "direct", "hybrid"}:
@@ -720,6 +736,17 @@ class CppRouteMlpClient:
         if dense_cache_gib:
             self.dense_cache_gib = parse_cpp_route_dense_cache_gib(dense_cache_gib)
             cmd.extend(["--dense-cache-gib", f"{self.dense_cache_gib:g}"])
+        packed_cache_gib = os.environ.get("HY3_CPP_ROUTE_PACKED_CACHE_GIB")
+        self.packed_cache_gib = 0.0
+        if packed_cache_gib:
+            self.packed_cache_gib = parse_cpp_route_packed_cache_gib(packed_cache_gib)
+            cmd.extend(["--packed-cache-gib", f"{self.packed_cache_gib:g}"])
+        combined_cache_gib = self.dense_cache_gib + self.packed_cache_gib
+        if combined_cache_gib > CPP_ROUTE_MAX_COMBINED_CACHE_GIB:
+            raise ValueError(
+                f"combined HY3 C++ dense and packed cache budget must be <= {CPP_ROUTE_MAX_COMBINED_CACHE_GIB:g}GiB, "
+                f"got {combined_cache_gib:g}GiB"
+            )
         self.q4_mode = parse_cpp_route_q4_mode(os.environ.get("HY3_CPP_ROUTE_Q4_MODE"))
         cmd.extend(["--q4-mode", self.q4_mode])
         self.proc = subprocess.Popen(
@@ -735,6 +762,7 @@ class CppRouteMlpClient:
         self.compute_s = 0.0
         self.read_calls = 0
         self.bytes_read = 0
+        self.packed_cache_hits = 0
 
     def _stderr_excerpt(self) -> str:
         if self.proc.stderr is None or self.proc.poll() is None:
@@ -807,7 +835,7 @@ class CppRouteMlpClient:
         hdr = self.proc.stdout.read(self.RESP.size)
         if len(hdr) != self.RESP.size:
             self._fail(f"C++ route daemon returned short response header ({len(hdr)} bytes)")
-        magic, status, payload_floats, read_calls, _reserved, compute_s, bytes_read = self.RESP.unpack(hdr)
+        magic, status, payload_floats, read_calls, packed_cache_hits, compute_s, bytes_read = self.RESP.unpack(hdr)
         if magic == b"HY3E" or status != 0:
             msg = self.proc.stdout.read(payload_floats).decode("utf-8", "replace") if payload_floats else "unknown daemon error"
             self._fail(f"C++ route daemon error: {msg}")
@@ -825,6 +853,7 @@ class CppRouteMlpClient:
         self.compute_s += float(compute_s)
         self.read_calls += int(read_calls)
         self.bytes_read += int(bytes_read)
+        self.packed_cache_hits += int(packed_cache_hits)
         out = np.frombuffer(raw, dtype="<f4").reshape(batch, seq_len, 4096).copy()
         return mx.array(out).astype(x.dtype)
 
@@ -836,6 +865,9 @@ class CppRouteMlpClient:
             "compute_s": round(self.compute_s, 3),
             "dense_cache_gib": self.dense_cache_gib,
             "dense_expert_gib": round(CPP_ROUTE_DENSE_EXPERT_GIB, 6),
+            "packed_cache_gib": self.packed_cache_gib,
+            "packed_expert_gib": round(CPP_ROUTE_PACKED_EXPERT_GIB, 6),
+            "packed_cache_hits": self.packed_cache_hits,
             "q4_mode": self.q4_mode,
             "read_calls": self.read_calls,
             "read_gib": round(self.bytes_read / (1024 ** 3), 6),

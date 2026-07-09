@@ -19,6 +19,8 @@
 namespace fs = std::filesystem;
 
 constexpr double kMaxDenseCacheGiB = 16.0;
+constexpr double kMaxPackedCacheGiB = 16.0;
+constexpr double kMaxCombinedCacheGiB = 16.0;
 constexpr double kBytesPerGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr size_t kDenseExpertBytes = static_cast<size_t>(3) * static_cast<size_t>(1536) * static_cast<size_t>(4096) * sizeof(float);
 constexpr int kHybridDenseRouteThreshold = 8;
@@ -55,6 +57,7 @@ struct Args {
   fs::path index;
   fs::path root;
   double dense_cache_gib = 0.0;
+  double packed_cache_gib = 0.0;
   Q4ExecutionMode q4_mode = Q4ExecutionMode::Dense;
 };
 
@@ -97,9 +100,10 @@ static Args parse_args(int argc, char **argv) {
     if (key == "--index") args.index = need("--index");
     else if (key == "--root") args.root = need("--root");
     else if (key == "--dense-cache-gib") args.dense_cache_gib = std::stod(need("--dense-cache-gib"));
+    else if (key == "--packed-cache-gib") args.packed_cache_gib = std::stod(need("--packed-cache-gib"));
     else if (key == "--q4-mode") args.q4_mode = parse_q4_mode(need("--q4-mode"));
     else if (key == "--help" || key == "-h") {
-      std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N<=16] [--q4-mode dense|direct|hybrid]\n");
+      std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N<=16] [--packed-cache-gib N<=16] [--q4-mode dense|direct|hybrid]\n");
       std::exit(0);
     } else {
       throw std::runtime_error("unknown arg: " + key);
@@ -109,6 +113,12 @@ static Args parse_args(int argc, char **argv) {
   if (args.root.empty()) throw std::runtime_error("--root is required");
   if (!std::isfinite(args.dense_cache_gib) || args.dense_cache_gib < 0.0 || args.dense_cache_gib > kMaxDenseCacheGiB) {
     throw std::runtime_error("--dense-cache-gib must be finite and in [0, 16]");
+  }
+  if (!std::isfinite(args.packed_cache_gib) || args.packed_cache_gib < 0.0 || args.packed_cache_gib > kMaxPackedCacheGiB) {
+    throw std::runtime_error("--packed-cache-gib must be finite and in [0, 16]");
+  }
+  if (args.dense_cache_gib + args.packed_cache_gib > kMaxCombinedCacheGiB) {
+    throw std::runtime_error("combined dense and packed cache budget must be <= 16 GiB");
   }
   return args;
 }
@@ -287,6 +297,7 @@ static uint64_t span_nbytes_for_route(const std::unordered_map<uint64_t, Span> &
 struct ComputeResult {
   std::vector<float> actual;
   uint32_t read_calls = 0;
+  uint32_t packed_cache_hits = 0;
   uint64_t bytes_read = 0;
   double compute_s = 0.0;
 };
@@ -302,6 +313,7 @@ static ComputeResult compute_request(
     const std::unordered_map<uint64_t, Span> &spans,
     FdCache &fds,
     DenseExpertCache &dense_cache,
+    PackedExpertCache &packed_cache,
     Q4ExecutionMode q4_mode) {
   if (layer < 0) throw std::runtime_error("layer must be non-negative");
   if (seq_len < 1 || seq_len > 4096) throw std::runtime_error("seq_len out of supported range");
@@ -313,6 +325,7 @@ static ComputeResult compute_request(
   ComputeResult result;
   result.actual.assign(static_cast<size_t>(seq_len) * 4096, 0.0f);
   auto t0 = std::chrono::steady_clock::now();
+  const uint64_t packed_hits_before = packed_cache.hits();
 
   std::vector<int> unique_experts;
   std::unordered_set<int> seen;
@@ -333,14 +346,20 @@ static ComputeResult compute_request(
         q4_mode == Q4ExecutionMode::Hybrid && dense_cache.contains(layer, expert)
             ? true
             : use_dense_for_expert(q4_mode, route_counts[expert]);
-    std::unique_ptr<ExpertBank> raw_bank;
+    ExpertBank loaded_bank;
+    const ExpertBank *raw_bank_ptr = nullptr;
     const DenseExpertBank *dense_bank = nullptr;
     if (use_dense) {
       dense_bank = &dense_cache.get(layer, expert, entries, spans, fds, result.read_calls, result.bytes_read);
     } else {
-      raw_bank = std::make_unique<ExpertBank>(load_expert_bank(entries, spans, fds, layer, expert));
-      result.bytes_read += raw_bank->raw.size();
-      ++result.read_calls;
+      raw_bank_ptr = packed_cache.find(layer, expert);
+      if (raw_bank_ptr == nullptr) {
+        loaded_bank = load_expert_bank(entries, spans, fds, layer, expert);
+        result.bytes_read += loaded_bank.raw.size();
+        ++result.read_calls;
+        raw_bank_ptr = packed_cache.insert(std::move(loaded_bank));
+        if (raw_bank_ptr == nullptr) raw_bank_ptr = &loaded_bank;
+      }
     }
     for (int token = 0; token < seq_len; ++token) {
       const float *x = hidden_flat.data() + static_cast<size_t>(token) * 4096;
@@ -351,7 +370,7 @@ static ComputeResult compute_request(
         if (use_dense) {
           compute_expert_route_dense(*dense_bank, x, route, route_outputs, xvec, up, gate, swiglu_hidden, down);
         } else {
-          compute_expert_route_direct(*raw_bank, x, route, route_outputs, xvec, swiglu_hidden, down, group_sums);
+          compute_expert_route_direct(*raw_bank_ptr, x, route, route_outputs, xvec, swiglu_hidden, down, group_sums);
         }
       }
     }
@@ -369,6 +388,7 @@ static ComputeResult compute_request(
 
   auto t1 = std::chrono::steady_clock::now();
   result.compute_s = std::chrono::duration<double>(t1 - t0).count();
+  result.packed_cache_hits = static_cast<uint32_t>(packed_cache.hits() - packed_hits_before);
   return result;
 }
 
@@ -388,13 +408,16 @@ int main(int argc, char **argv) {
     auto spans = build_spans(entries);
     FdCache fds(args.root);
     size_t dense_cache_bytes = static_cast<size_t>(args.dense_cache_gib * kBytesPerGiB);
+    size_t packed_cache_bytes = static_cast<size_t>(args.packed_cache_gib * kBytesPerGiB);
     DenseExpertCache dense_cache(dense_cache_bytes);
+    PackedExpertCache packed_cache(packed_cache_bytes);
     std::fprintf(
         stderr,
-        "hy3_route_mlp_daemon ready entries=%zu spans=%zu dense_cache_gib=%.3f dense_expert_gib=%.6f q4_mode=%s\n",
+        "hy3_route_mlp_daemon ready entries=%zu spans=%zu dense_cache_gib=%.3f packed_cache_gib=%.3f dense_expert_gib=%.6f q4_mode=%s\n",
         entries.size(),
         spans.size(),
         args.dense_cache_gib,
+        args.packed_cache_gib,
         static_cast<double>(kDenseExpertBytes) / kBytesPerGiB,
         q4_mode_name(args.q4_mode));
     std::fflush(stderr);
@@ -413,12 +436,13 @@ int main(int argc, char **argv) {
         if (!read_full(STDIN_FILENO, hidden.data(), hidden.size() * sizeof(float))) throw std::runtime_error("short hidden payload");
         if (!read_full(STDIN_FILENO, experts.data(), experts.size() * sizeof(int32_t))) throw std::runtime_error("short expert payload");
         if (!read_full(STDIN_FILENO, weights.data(), weights.size() * sizeof(float))) throw std::runtime_error("short route weight payload");
-        ComputeResult result = compute_request(static_cast<int>(req.layer), static_cast<int>(req.seq_len), static_cast<int>(req.topk), hidden, experts, weights, entries, spans, fds, dense_cache, args.q4_mode);
+        ComputeResult result = compute_request(static_cast<int>(req.layer), static_cast<int>(req.seq_len), static_cast<int>(req.topk), hidden, experts, weights, entries, spans, fds, dense_cache, packed_cache, args.q4_mode);
         ResponseHeader hdr{};
         std::memcpy(hdr.magic, "HY3O", 4);
         hdr.status = 0;
         hdr.payload_floats = static_cast<uint32_t>(result.actual.size());
         hdr.read_calls = result.read_calls;
+        hdr.reserved = result.packed_cache_hits;
         hdr.compute_s = result.compute_s;
         hdr.bytes_read = result.bytes_read;
         write_full(STDOUT_FILENO, &hdr, sizeof(hdr));
@@ -427,6 +451,7 @@ int main(int argc, char **argv) {
       } catch (const std::exception &e) {
         send_error(e.what());
         std::fflush(stdout);
+        return 1;
       }
     }
     return 0;

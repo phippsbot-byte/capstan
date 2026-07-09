@@ -11,6 +11,103 @@
 #include <unistd.h>
 #include <utility>
 
+static void rebind_slice(TensorSlice &slice, const std::vector<uint8_t> &raw) noexcept {
+  if (!raw.empty() && slice.offset <= raw.size() && slice.nbytes <= raw.size() - static_cast<size_t>(slice.offset)) {
+    slice.ptr = raw.data() + slice.offset;
+  } else {
+    slice.ptr = nullptr;
+  }
+}
+
+void ExpertBank::rebind_slices() noexcept {
+  rebind_slice(up_w, raw);
+  rebind_slice(up_s, raw);
+  rebind_slice(up_b, raw);
+  rebind_slice(gate_w, raw);
+  rebind_slice(gate_s, raw);
+  rebind_slice(gate_b, raw);
+  rebind_slice(down_w, raw);
+  rebind_slice(down_s, raw);
+  rebind_slice(down_b, raw);
+}
+
+ExpertBank::ExpertBank(ExpertBank &&other) noexcept {
+  *this = std::move(other);
+}
+
+ExpertBank &ExpertBank::operator=(ExpertBank &&other) noexcept {
+  if (this == &other) return *this;
+  layer = other.layer;
+  expert = other.expert;
+  raw = std::move(other.raw);
+  up_w = other.up_w;
+  up_s = other.up_s;
+  up_b = other.up_b;
+  gate_w = other.gate_w;
+  gate_s = other.gate_s;
+  gate_b = other.gate_b;
+  down_w = other.down_w;
+  down_s = other.down_s;
+  down_b = other.down_b;
+  rebind_slices();
+  other.up_w.ptr = nullptr;
+  other.up_s.ptr = nullptr;
+  other.up_b.ptr = nullptr;
+  other.gate_w.ptr = nullptr;
+  other.gate_s.ptr = nullptr;
+  other.gate_b.ptr = nullptr;
+  other.down_w.ptr = nullptr;
+  other.down_s.ptr = nullptr;
+  other.down_b.ptr = nullptr;
+  return *this;
+}
+
+const ExpertBank *PackedExpertCache::find(int layer, int expert) {
+  ++tick_;
+  auto it = cache_.find(span_key(layer, expert));
+  if (it == cache_.end()) {
+    ++misses_;
+    return nullptr;
+  }
+  ++hits_;
+  it->second.last_use = tick_;
+  return it->second.bank.get();
+}
+
+const ExpertBank *PackedExpertCache::insert(ExpertBank &&bank) {
+  ++tick_;
+  const size_t bank_bytes = bank.raw.size();
+  if (max_bytes_ == 0 || bank_bytes > max_bytes_) {
+    return nullptr;
+  }
+
+  const uint64_t key = span_key(bank.layer, bank.expert);
+  auto existing = cache_.find(key);
+  if (existing != cache_.end()) {
+    bytes_ -= existing->second.bytes;
+    cache_.erase(existing);
+  }
+  while (bytes_ + bank_bytes > max_bytes_ && !cache_.empty()) evict_one();
+
+  CacheEntry entry;
+  entry.bytes = bank_bytes;
+  entry.last_use = tick_;
+  entry.bank = std::make_unique<ExpertBank>(std::move(bank));
+  auto [inserted, _] = cache_.emplace(key, std::move(entry));
+  bytes_ += bank_bytes;
+  return inserted->second.bank.get();
+}
+
+void PackedExpertCache::evict_one() {
+  auto victim = cache_.begin();
+  for (auto it = cache_.begin(); it != cache_.end(); ++it) {
+    if (it->second.last_use < victim->second.last_use) victim = it;
+  }
+  bytes_ -= victim->second.bytes;
+  cache_.erase(victim);
+  ++evictions_;
+}
+
 static std::vector<std::string> split_local(const std::string &s, char delim) {
   std::vector<std::string> out;
   std::string item;

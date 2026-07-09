@@ -325,3 +325,27 @@ semantic collapse, but the broader logit deltas are nontrivial. Dense remains
 the default. `direct` top-k8 is the cleanest speed candidate; `hybrid` stays an
 experimental cold/hot speed lane until mixed dense/direct numerics are tightened
 or an explicit logit-tolerance policy is accepted.
+
+The persistent daemon now also exposes an opt-in byte-bounded packed
+`ExpertBank` LRU through `--packed-cache-gib` and Python
+`HY3_CPP_ROUTE_PACKED_CACHE_GIB`. Cache entries own stable moved buffers and
+rebind all tensor slices after moves; a focused CTest covers ownership, LRU,
+byte ceilings, disabled mode, and oversized entries. Dense plus packed cache
+budgets are jointly capped at 16GiB, and packed cache remains off by default.
+`hy3_route_mlp_daemon_smoke.py` provides the local sidecar-backed repeated-request
+gate and records output hashes plus read/hit telemetry.
+
+Top-k8 direct, 30-token prompt, four generated tokens, 16GiB packed cache:
+
+| Shape | Step sum | Decode median | C++ reads | Packed hits | Tokens | Swap delta |
+|---|---:|---:|---:|---:|---|---:|
+| direct, cache off | 91.766s | 3.944s | 82.048GiB | 0 | `[185, 120029, 72520, 423]` | 0.0GiB |
+| direct, global packed LRU | **82.298s** | **2.994s** | **75.493GiB** | 663 | same | 0.0GiB |
+
+That is **10.3%** lower total step wall and **24.1%** lower median decode wall.
+Aggregate read reduction is only **8.0%**, below the initial 15% estimate,
+because prefill routing has limited repeated-bank overlap. A layer-sharded LRU
+produced 659 hits / 75.532GiB and no material improvement, so the runtime keeps
+the simpler global LRU. Artifact:
+`results/20260709-cpp-route-packed-cache-summary.json`; repeated-request proof:
+`results/20260709-cpp-route-packed-cache-repeat-smoke.json`.

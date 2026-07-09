@@ -29,6 +29,13 @@ add_executable(hy3_q4_affine_test
 target_compile_options(hy3_q4_affine_test PRIVATE -Wall -Wextra -Wpedantic -O2)
 add_test(NAME hy3_q4_affine_test COMMAND hy3_q4_affine_test)
 
+add_executable(hy3_expert_cache_test
+  hy3_expert_cache_test.cpp
+  hy3_expert_bank.cpp
+)
+target_compile_options(hy3_expert_cache_test PRIVATE -Wall -Wextra -Wpedantic -O2)
+add_test(NAME hy3_expert_cache_test COMMAND hy3_expert_cache_test)
+
 if(APPLE)
   target_link_libraries(hy3_sidecar_io PRIVATE "-framework Accelerate")
   target_link_libraries(hy3_route_mlp_daemon PRIVATE "-framework Accelerate")
