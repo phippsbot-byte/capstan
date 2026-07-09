@@ -150,7 +150,7 @@ capstan fleet recover
 capstan fleet recover --execute --wait
 ```
 
-`fleet recover` only starts enabled registered manifests that are down and have a `[start]` section. It skips already-ready, dormant, invalid, and inspect-only manifests. No side effects happen unless `--execute` is passed; add `--wait` when startup should verify readiness before returning green.
+`fleet recover` only starts enabled registered manifests that are down and have a `[start]` section. It skips already-ready, dormant, invalid, and inspect-only manifests. No side effects happen unless `--execute` is passed, and executed recovery requires `--wait` so startup readiness is verified before returning green.
 
 ## macOS service wrapper
 
