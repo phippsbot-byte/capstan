@@ -89,6 +89,20 @@ struct ResponseHeader {
 static_assert(sizeof(RequestHeader) == 20);
 static_assert(sizeof(ResponseHeader) == 36);
 
+static double parse_double_arg(const std::string &raw, const char *name) {
+  size_t consumed = 0;
+  double value = 0.0;
+  try {
+    value = std::stod(raw, &consumed);
+  } catch (const std::exception &) {
+    throw std::runtime_error(std::string("invalid value for ") + name + ": " + raw);
+  }
+  if (consumed != raw.size()) {
+    throw std::runtime_error(std::string("invalid value for ") + name + ": " + raw);
+  }
+  return value;
+}
+
 static Args parse_args(int argc, char **argv) {
   Args args;
   for (int i = 1; i < argc; ++i) {
@@ -99,8 +113,8 @@ static Args parse_args(int argc, char **argv) {
     };
     if (key == "--index") args.index = need("--index");
     else if (key == "--root") args.root = need("--root");
-    else if (key == "--dense-cache-gib") args.dense_cache_gib = std::stod(need("--dense-cache-gib"));
-    else if (key == "--packed-cache-gib") args.packed_cache_gib = std::stod(need("--packed-cache-gib"));
+    else if (key == "--dense-cache-gib") args.dense_cache_gib = parse_double_arg(need("--dense-cache-gib"), "--dense-cache-gib");
+    else if (key == "--packed-cache-gib") args.packed_cache_gib = parse_double_arg(need("--packed-cache-gib"), "--packed-cache-gib");
     else if (key == "--q4-mode") args.q4_mode = parse_q4_mode(need("--q4-mode"));
     else if (key == "--help" || key == "-h") {
       std::fprintf(stderr, "usage: hy3_route_mlp_daemon --index compact-index.tsv --root sidecar-root [--dense-cache-gib N<=16] [--packed-cache-gib N<=16] [--q4-mode dense|direct|hybrid]\n");

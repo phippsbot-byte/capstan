@@ -334,6 +334,12 @@ byte ceilings, disabled mode, and oversized entries. Dense plus packed cache
 budgets are jointly capped at 16GiB, and packed cache remains off by default.
 `hy3_route_mlp_daemon_smoke.py` provides the local sidecar-backed repeated-request
 gate and records output hashes plus read/hit telemetry.
+The Python singleton serializes each full request/response exchange, protects
+singleton lifecycle with a reentrant lock, and resets that lock after `fork()`;
+children discard inherited clients by PID and spawn their own daemon. Cache
+budgets are forwarded with round-trip-safe precision, while the C++ parser
+rejects trailing junk instead of accepting prefixes such as `1junk`. Stress
+artifact: `results/20260709-cpp-route-client-hardening-smoke.json`.
 
 Top-k8 direct, 30-token prompt, four generated tokens, 16GiB packed cache:
 

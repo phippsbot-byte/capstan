@@ -10,11 +10,12 @@ import math
 import os
 import struct
 import subprocess
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, NoReturn, Optional, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -440,6 +441,7 @@ class Hy3SidecarStore:
 
 _STORE: Hy3SidecarStore | None = None
 _CPP_ROUTE_CLIENT: "CppRouteMlpClient | None" = None
+_CPP_ROUTE_CLIENT_LOCK = threading.RLock()
 _PROFILE: list[dict[str, Any]] = []
 _ROUTE_TRACE: list[dict[str, Any]] = []
 _ROUTE_EVENT = 0
@@ -453,6 +455,15 @@ _MOE_TIMES: dict[str, float] = {
     "shared_s": 0.0,
     "cpp_route_s": 0.0,
 }
+
+
+def _reset_cpp_route_state_after_fork() -> None:
+    global _CPP_ROUTE_CLIENT_LOCK
+    _CPP_ROUTE_CLIENT_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_cpp_route_state_after_fork)
 
 
 def env_truthy(name: str) -> bool:
@@ -727,6 +738,8 @@ class CppRouteMlpClient:
     RESP = struct.Struct("<4sIIIIdQ")
 
     def __init__(self) -> None:
+        self.owner_pid = os.getpid()
+        self._request_lock = threading.RLock()
         binary = os.environ.get("HY3_CPP_ROUTE_DAEMON_BIN", DEFAULT_CPP_ROUTE_DAEMON_BIN)
         index = os.environ.get("HY3_CPP_ROUTE_INDEX", DEFAULT_CPP_ROUTE_INDEX)
         root = os.environ.get("HY3_CPP_ROUTE_ROOT", DEFAULT_CPP_ROUTE_ROOT)
@@ -735,12 +748,12 @@ class CppRouteMlpClient:
         self.dense_cache_gib = 0.0
         if dense_cache_gib:
             self.dense_cache_gib = parse_cpp_route_dense_cache_gib(dense_cache_gib)
-            cmd.extend(["--dense-cache-gib", f"{self.dense_cache_gib:g}"])
+            cmd.extend(["--dense-cache-gib", format(self.dense_cache_gib, ".17g")])
         packed_cache_gib = os.environ.get("HY3_CPP_ROUTE_PACKED_CACHE_GIB")
         self.packed_cache_gib = 0.0
         if packed_cache_gib:
             self.packed_cache_gib = parse_cpp_route_packed_cache_gib(packed_cache_gib)
-            cmd.extend(["--packed-cache-gib", f"{self.packed_cache_gib:g}"])
+            cmd.extend(["--packed-cache-gib", format(self.packed_cache_gib, ".17g")])
         combined_cache_gib = self.dense_cache_gib + self.packed_cache_gib
         if combined_cache_gib > CPP_ROUTE_MAX_COMBINED_CACHE_GIB:
             raise ValueError(
@@ -774,33 +787,71 @@ class CppRouteMlpClient:
         text = data.decode("utf-8", "replace").strip()
         return f"; daemon stderr: {text[-1000:]}" if text else ""
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str) -> NoReturn:
         detail = self._stderr_excerpt()
         self.close()
         global _CPP_ROUTE_CLIENT
-        if _CPP_ROUTE_CLIENT is self:
-            _CPP_ROUTE_CLIENT = None
+        with _CPP_ROUTE_CLIENT_LOCK:
+            if _CPP_ROUTE_CLIENT is self:
+                _CPP_ROUTE_CLIENT = None
         raise RuntimeError(message + detail)
 
     def close(self) -> None:
-        proc = self.proc
-        if proc.stdin:
+        if self.owner_pid != os.getpid():
+            return
+        with self._request_lock:
+            proc = self.proc
+            if proc.stdin:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+    def _exchange(self, payload: bytes, expected_floats: int) -> bytes:
+        if self.owner_pid != os.getpid():
+            raise RuntimeError("C++ route client cannot be reused after fork; call get_cpp_route_client() in the child")
+        with self._request_lock:
+            stdin = self.proc.stdin
+            stdout = self.proc.stdout
+            if stdin is None or stdout is None:
+                self._fail("C++ route daemon pipes are closed")
+            if self.proc.poll() is not None:
+                self._fail("C++ route daemon exited before request")
+            t0 = time.time()
             try:
-                proc.stdin.close()
-            except Exception:
-                pass
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                stdin.write(payload)
+                stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                self._fail(f"C++ route daemon write failed: {exc}")
+            hdr = stdout.read(self.RESP.size)
+            if len(hdr) != self.RESP.size:
+                self._fail(f"C++ route daemon returned short response header ({len(hdr)} bytes)")
+            magic, status, payload_floats, read_calls, packed_cache_hits, compute_s, bytes_read = self.RESP.unpack(hdr)
+            if magic == b"HY3E" or status != 0:
+                msg = stdout.read(payload_floats).decode("utf-8", "replace") if payload_floats else "unknown daemon error"
+                self._fail(f"C++ route daemon error: {msg}")
+            if magic != b"HY3O":
+                self._fail(f"C++ route daemon returned bad magic: {magic!r}")
+            if payload_floats != expected_floats:
+                self._fail(f"C++ route daemon payload size mismatch: {payload_floats} != {expected_floats}")
+            raw = stdout.read(payload_floats * 4)
+            if len(raw) != payload_floats * 4:
+                self._fail("C++ route daemon returned short output payload")
+            self.calls += 1
+            self.wall_s += time.time() - t0
+            self.compute_s += float(compute_s)
+            self.read_calls += int(read_calls)
+            self.bytes_read += int(bytes_read)
+            self.packed_cache_hits += int(packed_cache_hits)
+            return raw
 
     def compute(self, layer: int, x: mx.array, indices: mx.array, route_weights: mx.array) -> mx.array:
-        if self.proc.stdin is None or self.proc.stdout is None:
-            self._fail("C++ route daemon pipes are closed")
-        if self.proc.poll() is not None:
-            self._fail("C++ route daemon exited before request")
         mx.eval(x, indices, route_weights)
         x_np = np.ascontiguousarray(np.array(x.astype(mx.float32), copy=False), dtype=np.float32)
         idx_np = np.ascontiguousarray(np.array(indices, copy=False), dtype=np.int32)
@@ -826,70 +877,55 @@ class CppRouteMlpClient:
             + idx_np.reshape(flat_seq, topk).tobytes()
             + weight_np.reshape(flat_seq, topk).tobytes()
         )
-        t0 = time.time()
-        try:
-            self.proc.stdin.write(payload)
-            self.proc.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            self._fail(f"C++ route daemon write failed: {exc}")
-        hdr = self.proc.stdout.read(self.RESP.size)
-        if len(hdr) != self.RESP.size:
-            self._fail(f"C++ route daemon returned short response header ({len(hdr)} bytes)")
-        magic, status, payload_floats, read_calls, packed_cache_hits, compute_s, bytes_read = self.RESP.unpack(hdr)
-        if magic == b"HY3E" or status != 0:
-            msg = self.proc.stdout.read(payload_floats).decode("utf-8", "replace") if payload_floats else "unknown daemon error"
-            self._fail(f"C++ route daemon error: {msg}")
-        if magic != b"HY3O":
-            self._fail(f"C++ route daemon returned bad magic: {magic!r}")
         expected = flat_seq * 4096
-        if payload_floats != expected:
-            self._fail(f"C++ route daemon payload size mismatch: {payload_floats} != {expected}")
-        raw = self.proc.stdout.read(payload_floats * 4)
-        if len(raw) != payload_floats * 4:
-            self._fail("C++ route daemon returned short output payload")
-        wall = time.time() - t0
-        self.calls += 1
-        self.wall_s += wall
-        self.compute_s += float(compute_s)
-        self.read_calls += int(read_calls)
-        self.bytes_read += int(bytes_read)
-        self.packed_cache_hits += int(packed_cache_hits)
+        raw = self._exchange(payload, expected)
         out = np.frombuffer(raw, dtype="<f4").reshape(batch, seq_len, 4096).copy()
         return mx.array(out).astype(x.dtype)
 
     def stats(self) -> dict[str, Any]:
-        return {
-            "enabled": True,
-            "calls": self.calls,
-            "wall_s": round(self.wall_s, 3),
-            "compute_s": round(self.compute_s, 3),
-            "dense_cache_gib": self.dense_cache_gib,
-            "dense_expert_gib": round(CPP_ROUTE_DENSE_EXPERT_GIB, 6),
-            "packed_cache_gib": self.packed_cache_gib,
-            "packed_expert_gib": round(CPP_ROUTE_PACKED_EXPERT_GIB, 6),
-            "packed_cache_hits": self.packed_cache_hits,
-            "q4_mode": self.q4_mode,
-            "read_calls": self.read_calls,
-            "read_gib": round(self.bytes_read / (1024 ** 3), 6),
-        }
+        with self._request_lock:
+            return {
+                "enabled": True,
+                "calls": self.calls,
+                "wall_s": round(self.wall_s, 3),
+                "compute_s": round(self.compute_s, 3),
+                "dense_cache_gib": self.dense_cache_gib,
+                "dense_expert_gib": round(CPP_ROUTE_DENSE_EXPERT_GIB, 6),
+                "packed_cache_gib": self.packed_cache_gib,
+                "packed_expert_gib": round(CPP_ROUTE_PACKED_EXPERT_GIB, 6),
+                "packed_cache_hits": self.packed_cache_hits,
+                "q4_mode": self.q4_mode,
+                "read_calls": self.read_calls,
+                "read_gib": round(self.bytes_read / (1024 ** 3), 6),
+            }
 
 
 def get_cpp_route_client() -> CppRouteMlpClient:
     global _CPP_ROUTE_CLIENT
-    if _CPP_ROUTE_CLIENT is None:
-        _CPP_ROUTE_CLIENT = CppRouteMlpClient()
-    return _CPP_ROUTE_CLIENT
+    with _CPP_ROUTE_CLIENT_LOCK:
+        current_pid = os.getpid()
+        if _CPP_ROUTE_CLIENT is not None and _CPP_ROUTE_CLIENT.owner_pid != current_pid:
+            _CPP_ROUTE_CLIENT = None
+        if _CPP_ROUTE_CLIENT is None:
+            _CPP_ROUTE_CLIENT = CppRouteMlpClient()
+        return _CPP_ROUTE_CLIENT
 
 
 def reset_cpp_route_client() -> None:
     global _CPP_ROUTE_CLIENT
-    if _CPP_ROUTE_CLIENT is not None:
-        _CPP_ROUTE_CLIENT.close()
-    _CPP_ROUTE_CLIENT = None
+    with _CPP_ROUTE_CLIENT_LOCK:
+        client = _CPP_ROUTE_CLIENT
+        _CPP_ROUTE_CLIENT = None
+    if client is not None:
+        client.close()
 
 
 def get_cpp_route_stats() -> dict[str, Any]:
-    return _CPP_ROUTE_CLIENT.stats() if _CPP_ROUTE_CLIENT is not None else {"enabled": cpp_route_mlp_enabled(), "calls": 0}
+    with _CPP_ROUTE_CLIENT_LOCK:
+        client = _CPP_ROUTE_CLIENT
+        if client is not None and client.owner_pid != os.getpid():
+            client = None
+    return client.stats() if client is not None else {"enabled": cpp_route_mlp_enabled(), "calls": 0}
 
 
 def reset_profile() -> None:

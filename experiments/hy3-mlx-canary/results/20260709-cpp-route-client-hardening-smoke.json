@@ -1,0 +1,47 @@
+{
+  "schema": "hy3-cpp-route-client-hardening-smoke-v1",
+  "date": "2026-07-09",
+  "status": "PASS",
+  "environment": {
+    "python": "3.11",
+    "daemon": "/tmp/capstan-hy3-review2/hy3_route_mlp_daemon",
+    "fixture": "cpp/fixtures/hy3-layer1-top5-bos.json",
+    "q4_mode": "direct",
+    "packed_cache_gib": 0.1
+  },
+  "singleton": {
+    "concurrent_lookups": 16,
+    "unique_clients": 1
+  },
+  "transactions": {
+    "concurrent_exchanges": 4,
+    "serialized_without_protocol_corruption": true,
+    "byte_identical_output_hashes": true
+  },
+  "fork": {
+    "inherited_client_rejected": true,
+    "child_spawned_new_daemon": true,
+    "parent_daemon_survived_child": true,
+    "child_output_matched_parent": true
+  },
+  "cache_budget_boundary": {
+    "dense_cache_gib": "15.99999",
+    "packed_cache_gib": "0.00001",
+    "accepted_by_python_and_daemon": true,
+    "serialization": ".17g"
+  },
+  "strict_cpp_parse": {
+    "input": "--packed-cache-gib 1junk",
+    "exit_status": 2,
+    "stderr_contains": "invalid value for --packed-cache-gib: 1junk",
+    "rejected": true
+  },
+  "regression_gates": {
+    "python_tests": "49/49",
+    "ctest": "2/2",
+    "package_artifacts": 2,
+    "repeat_smoke_byte_identical": true,
+    "repeat_smoke_second_read_calls": 0,
+    "repeat_smoke_second_cache_hits": 5
+  }
+}
