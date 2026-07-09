@@ -43,6 +43,9 @@ Compile/static sanity:
 
 ```bash
 /opt/homebrew/bin/python3.11 -m py_compile *.py
+cmake -S cpp -B /tmp/capstan-hy3-cpp-build -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/capstan-hy3-cpp-build --parallel
+ctest --test-dir /tmp/capstan-hy3-cpp-build --output-on-failure
 ```
 
 Metadata-only optimizer dry run:
