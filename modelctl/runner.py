@@ -142,13 +142,13 @@ def stop(manifest: ModelManifest, timeout_sec: int = 10) -> dict[str, Any]:
     if pid is None:
         if pid_path.exists():
             if pid_state_owner_mismatch(manifest, state):
-                return {"stopped": False, "already_stopped": False, "owner_mismatch": True, "pid_path": str(pid_path), "pid_state": state}
+                return {"ok": False, "stopped": False, "already_stopped": False, "owner_mismatch": True, "safe_to_start": False, "pid_path": str(pid_path), "pid_state": state}
             pid_path.unlink()
-        return {"stopped": False, "already_stopped": True, "pid_path_removed": str(pid_path)}
+        return {"ok": True, "stopped": False, "already_stopped": True, "safe_to_start": True, "pid_path_removed": str(pid_path)}
     ok = terminate_process_group(pid, timeout_sec=timeout_sec)
     if ok and pid_path.exists():
         pid_path.unlink()
-    return {"stopped": ok, "pid": pid, "pid_path": str(pid_path)}
+    return {"ok": ok, "stopped": ok, "pid": pid, "known_pid_stopped": ok, "safe_to_start": ok, "unexpected_active_pid": None if ok else pid, "pid_path": str(pid_path)}
 
 
 def _manifest_ref(manifest: ModelManifest) -> dict[str, Any]:
