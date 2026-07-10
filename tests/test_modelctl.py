@@ -42,7 +42,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.24.3")
+        self.assertEqual(pyproject["project"]["version"], "0.24.4")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")

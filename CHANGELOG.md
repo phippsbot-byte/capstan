@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.24.4
+
+- Validate manifests and action results strictly so malformed lifecycle requests and ambiguous failures stop with non-zero exit codes.
+- Add canonical multi-resource lifecycle locks and kernel-backed PID/PGID/birth identity checks before signaling or deleting process state.
+- Publish a private durable launch transaction before `Popen`, then promote it to authenticated v2 PID state only after process identity capture.
+- Make rotation and promotion single-lock transactions with readiness plus endpoint-ownership proof, authenticated state handoff, post-health gating, and rollback.
+- Preserve malformed, untrusted, pending, mismatched, and unproven state instead of signaling, overwriting, or deleting it.
+
 ## v0.24.3
 
 - Make `fleet intake` treat existing manifest `[preflight].exclusive_ports` as reserved local ports, skipping matching candidates before `/v1/models` probes or manifest drafts.
