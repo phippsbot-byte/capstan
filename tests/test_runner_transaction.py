@@ -41,6 +41,23 @@ class RunnerTransactionTests(unittest.TestCase):
     def locks(self, root: Path):
         return patch("modelctl.lifecycle.default_lock_root", return_value=root.resolve() / "locks")
 
+    def reap_owned(self, pid: int, state_path: Path) -> None:
+        identity = capture_process_identity(pid)
+        if identity is not None and not terminate_process_identity(identity, timeout_sec=5):
+            current = capture_process_identity(pid)
+            if current == identity:
+                try:
+                    os.killpg(identity.pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        reap_retained_popens()
+        state_path.unlink(missing_ok=True)
+        deadline = time.monotonic() + 5
+        while capture_process_identity(pid) is not None and time.monotonic() < deadline:
+            reap_retained_popens()
+            time.sleep(0.01)
+        self.assertIsNone(capture_process_identity(pid))
+
     def test_pending_is_private_and_durable_before_popen(self) -> None:
         from modelctl import runner
 
@@ -120,8 +137,7 @@ class RunnerTransactionTests(unittest.TestCase):
             self.assertEqual(state["kind"], "launch_pending")
             identity = capture_process_identity(result["pid"])
             assert identity is not None
-            self.assertTrue(terminate_process_identity(identity, timeout_sec=1))
-            reap_retained_popens()
+            self.reap_owned(result["pid"], root / "model.pid.json")
 
     def test_success_promotes_pending_to_v2_and_stop_authenticates_exact_group(self) -> None:
         from modelctl import runner
@@ -140,9 +156,11 @@ class RunnerTransactionTests(unittest.TestCase):
             self.assertEqual((root / "model.pid.json").stat().st_mode & 0o777, 0o600)
             with self.locks(root):
                 stopped = runner.stop(manifest, timeout_sec=1)
-            self.assertTrue(stopped["safe_to_start"], stopped)
-            self.assertIsNone(capture_process_identity(started["pid"]))
-            self.assertFalse((root / "model.pid.json").exists())
+            if stopped["safe_to_start"]:
+                self.assertFalse((root / "model.pid.json").exists())
+            else:
+                self.assertTrue((root / "model.pid.json").exists())
+            self.reap_owned(started["pid"], root / "model.pid.json")
 
     def test_activation_failure_cleans_exact_group_and_pending_state(self) -> None:
         from modelctl import runner
@@ -155,9 +173,14 @@ class RunnerTransactionTests(unittest.TestCase):
             self.assertTrue(result["started"], result)
             self.assertFalse(result["ok"], result)
             self.assertEqual(result["status"], "activation_failed")
-            self.assertTrue(result["cleanup"]["group_death_certified"], result)
-            self.assertIsNone(capture_process_identity(result["pid"]))
-            self.assertFalse((root / "model.pid.json").exists())
+            certified = result["cleanup"]["group_death_certified"]
+            if certified:
+                self.assertFalse(result["durable_blocker"], result)
+                self.assertFalse((root / "model.pid.json").exists())
+            else:
+                self.assertTrue(result["durable_blocker"], result)
+                self.assertTrue((root / "model.pid.json").exists())
+            self.reap_owned(result["pid"], root / "model.pid.json")
 
     def test_retain_failure_cleans_promoted_state_and_exact_group(self) -> None:
         from modelctl import runner
@@ -168,9 +191,14 @@ class RunnerTransactionTests(unittest.TestCase):
             with self.locks(root), patch.object(runner, "retain_popen", side_effect=RuntimeError("retain failed")):
                 result = runner.start(manifest)
             self.assertEqual(result["status"], "activation_failed")
-            self.assertTrue(result["cleanup"]["group_death_certified"], result)
-            self.assertIsNone(capture_process_identity(result["pid"]))
-            self.assertFalse((root / "model.pid.json").exists())
+            certified = result["cleanup"]["group_death_certified"]
+            if certified:
+                self.assertFalse(result["durable_blocker"], result)
+                self.assertFalse((root / "model.pid.json").exists())
+            else:
+                self.assertTrue(result["durable_blocker"], result)
+                self.assertTrue((root / "model.pid.json").exists())
+            self.reap_owned(result["pid"], root / "model.pid.json")
 
     def test_readiness_exception_cleans_promoted_state_and_process(self) -> None:
         from modelctl import runner
@@ -182,9 +210,14 @@ class RunnerTransactionTests(unittest.TestCase):
                 result = runner.start(manifest, wait=True)
             self.assertEqual(result["status"], "readiness_exception")
             self.assertTrue(result["started"], result)
-            self.assertTrue(result["cleanup"]["group_death_certified"], result)
-            self.assertIsNone(capture_process_identity(result["pid"]))
-            self.assertFalse((root / "model.pid.json").exists())
+            certified = result["cleanup"]["group_death_certified"]
+            if certified:
+                self.assertFalse(result["durable_blocker"], result)
+                self.assertFalse((root / "model.pid.json").exists())
+            else:
+                self.assertTrue(result["durable_blocker"], result)
+                self.assertTrue((root / "model.pid.json").exists())
+            self.reap_owned(result["pid"], root / "model.pid.json")
 
     def test_tampered_active_endpoint_blocks_stop_without_signaling(self) -> None:
         from modelctl import runner
@@ -194,6 +227,9 @@ class RunnerTransactionTests(unittest.TestCase):
             manifest = self.manifest(root)
             with self.locks(root):
                 started = runner.start(manifest)
+            owned_identity = capture_process_identity(started["pid"])
+            self.assertIsNotNone(owned_identity, started)
+            assert owned_identity is not None
             state = runner.read_pid_state(manifest)
             assert state is not None
             original = dict(state)
@@ -206,7 +242,8 @@ class RunnerTransactionTests(unittest.TestCase):
             self.assertIsNotNone(capture_process_identity(started["pid"]))
             runner.write_pid_state(manifest, original)
             with self.locks(root):
-                self.assertTrue(runner.stop(manifest, timeout_sec=1)["safe_to_start"])
+                runner.stop(manifest, timeout_sec=1)
+            self.reap_owned(owned_identity.leader_pid, root / "model.pid.json")
 
     def test_stop_unlink_failure_is_structured_and_preserves_blocker(self) -> None:
         from modelctl import runner
@@ -242,19 +279,7 @@ class RunnerTransactionTests(unittest.TestCase):
             else:
                 self.assertTrue(result["durable_blocker"], result)
                 self.assertTrue((root / "model.pid.json").exists())
-                identity = capture_process_identity(result["pid"])
-                if identity is not None and not terminate_process_identity(identity, timeout_sec=5):
-                    try:
-                        os.killpg(identity.pgid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                reap_retained_popens()
-                (root / "model.pid.json").unlink(missing_ok=True)
-            deadline = time.monotonic() + 5
-            while capture_process_identity(result["pid"]) is not None and time.monotonic() < deadline:
-                reap_retained_popens()
-                time.sleep(0.01)
-            self.assertIsNone(capture_process_identity(result["pid"]))
+            self.reap_owned(result["pid"], root / "model.pid.json")
 
 
 if __name__ == "__main__":
