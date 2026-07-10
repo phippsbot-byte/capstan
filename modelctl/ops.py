@@ -335,7 +335,7 @@ def cleanup_execute(manifest: ModelManifest, force: bool = False) -> dict[str, A
         else:
             p.unlink()
         deleted.append(row)
-    return {"deleted": deleted, "skipped": skipped}
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
 
 
 def soak(manifest: ModelManifest, count: int = 3, delay_sec: float = 0.0, fail_fast: bool = True) -> dict[str, Any]:
