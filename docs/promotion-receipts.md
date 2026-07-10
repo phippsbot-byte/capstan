@@ -76,6 +76,9 @@ Capstan requires the receipt to be:
 - no larger than 1 MiB;
 - byte-for-byte equal to the SHA-256 pinned in the manifest;
 - fresh, timezone-aware, and not materially future-dated;
-- bound to the candidate model ID, endpoint, launch command/CWD, hashed `start.env`, and current `[preflight].required_paths` metadata/content fingerprints.
+- bound to the candidate model ID, endpoint, launch command/CWD, hashed `start.env`, and current `[preflight].required_paths` content fingerprints;
+- backed by at least one receipt-bound required artifact; each must be a regular file no larger than 128 MiB and is fully SHA-256 hashed.
+
+Use model config files, sidecar manifests, compact indexes, or wrapper scripts as receipt-bound artifacts. Do not list model directories or giant shards for receipt binding; list the small digest manifest that identifies them.
 
 The receipt file can live on a writable external volume because its bytes are hash-pinned in the manifest and read with no-follow/inode consistency checks.

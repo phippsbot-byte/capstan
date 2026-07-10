@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from modelctl import cli
 from modelctl.manifest import ManifestError, load_manifest
-from modelctl.receipt import RECEIPT_SCHEMA, candidate_binding, validate_promotion_receipt
+from modelctl.receipt import MAX_ARTIFACT_HASH_BYTES, RECEIPT_SCHEMA, ReceiptError, candidate_binding, validate_promotion_receipt
 
 
 class PromotionReceiptTests(unittest.TestCase):
@@ -108,6 +108,45 @@ class PromotionReceiptTests(unittest.TestCase):
             env_changed = candidate_binding(load_manifest(env_path))
             self.assertNotEqual(launch_changed["candidate_fingerprint"], env_changed["candidate_fingerprint"])
             self.assertNotIn("RUNTIME_MODE", json.dumps(env_changed))
+
+    def test_receipt_artifacts_require_small_regular_digest_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(root)
+            artifact = root / "artifact.bin"
+            directory = root / "artifact-directory"
+            directory.mkdir()
+            path.write_text(path.read_text().replace(str(artifact), str(directory)))
+            with self.assertRaisesRegex(ReceiptError, "must be a regular file"):
+                candidate_binding(load_manifest(path))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(root)
+            artifact = root / "artifact.bin"
+            with artifact.open("wb") as handle:
+                handle.truncate(MAX_ARTIFACT_HASH_BYTES + 1)
+            with self.assertRaisesRegex(ReceiptError, "exceeds"):
+                candidate_binding(load_manifest(path))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(root)
+            text = path.read_text().replace(f'required_paths = ["{root / "artifact.bin"}"]\n', "")
+            path.write_text(text)
+            binding = candidate_binding(load_manifest(path))
+            body = {
+                "schema": RECEIPT_SCHEMA,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "decision": "promote",
+                "candidate_fingerprint": binding["candidate_fingerprint"],
+                "gates": {"logit": {"pass": True}, "quality": {"pass": True}},
+            }
+            data = (json.dumps(body, sort_keys=True) + "\n").encode()
+            (root / "receipt.json").write_bytes(data)
+            path.write_text(text + f'\n[promotion.receipt]\npath = "{root / "receipt.json"}"\nsha256 = "{hashlib.sha256(data).hexdigest()}"\n')
+            result = validate_promotion_receipt(load_manifest(path))
+            self.assertIn("candidate_artifacts_missing", result["issues"])
 
     def test_valid_receipt_is_hash_age_decision_gate_and_candidate_bound(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

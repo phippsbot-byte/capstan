@@ -36,17 +36,21 @@ def _artifact_binding(raw_path: str) -> dict[str, Any]:
         info = canonical.stat()
     except OSError as exc:
         raise ReceiptError(f"required artifact unavailable: {raw_path}: {exc}") from exc
-    if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
-        raise ReceiptError(f"required artifact is not a regular file or directory: {canonical}")
-    row: dict[str, Any] = {
+    if not stat.S_ISREG(info.st_mode):
+        raise ReceiptError(
+            f"receipt-bound artifact must be a regular file, not a directory; list a small digest manifest instead: {canonical}"
+        )
+    if info.st_size > MAX_ARTIFACT_HASH_BYTES:
+        raise ReceiptError(
+            f"receipt-bound artifact exceeds {MAX_ARTIFACT_HASH_BYTES} bytes; list a small digest manifest instead: {canonical}"
+        )
+    return {
         "path": str(canonical),
-        "kind": "file" if stat.S_ISREG(info.st_mode) else "directory",
+        "kind": "file",
         "size": info.st_size,
         "mtime_ns": info.st_mtime_ns,
+        "sha256": _sha256_file(canonical),
     }
-    if stat.S_ISREG(info.st_mode) and info.st_size <= MAX_ARTIFACT_HASH_BYTES:
-        row["sha256"] = _sha256_file(canonical)
-    return row
 
 
 def candidate_binding(manifest: ModelManifest) -> dict[str, Any]:
@@ -193,6 +197,8 @@ def validate_promotion_receipt(manifest: ModelManifest, *, now: datetime | None 
         binding = candidate_binding(manifest)
     except ReceiptError as exc:
         return {**base, "actual_sha256": actual_sha256, "issues": ["candidate_binding_failed"], "error": str(exc)}
+    if not binding["artifacts"]:
+        issues.append("candidate_artifacts_missing")
     if receipt.get("candidate_fingerprint") != binding["candidate_fingerprint"]:
         issues.append("candidate_fingerprint_mismatch")
 
