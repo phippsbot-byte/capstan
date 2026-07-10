@@ -1813,7 +1813,9 @@ class ModelCtlTests(unittest.TestCase):
                 cwd = "{root}"
                 log_path = "{root / 'fake.log'}"
                 pid_path = "{root / 'fake.pid.json'}"
-                startup_timeout_sec = 20
+                # GitHub's arm64 macOS runners can take >20s to schedule a
+                # freshly spawned Python HTTP server under load.
+                startup_timeout_sec = 60
                 readiness_url = "http://127.0.0.1:{port}/v1/models"
                 readiness_contains = "fake-model"
 
@@ -1827,7 +1829,7 @@ class ModelCtlTests(unittest.TestCase):
                 temperature = 0
             ''')
             cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
-            start = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            start = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=75)
             self.assertEqual(start.returncode, 0, start.stderr + start.stdout)
             smoke = subprocess.run(cmd + ["smoke"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(smoke.returncode, 0, smoke.stderr + smoke.stdout)
