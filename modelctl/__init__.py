@@ -4,6 +4,6 @@ The implementation package remains ``modelctl`` for compatibility during the
 Capstan rename. New callers should prefer the ``capstan`` console entry point.
 """
 
-__version__ = "0.24.4"
+__version__ = "0.24.5"
 PRODUCT_NAME = "capstan"
 LEGACY_CLI_NAME = "modelctl"

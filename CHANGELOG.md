@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.24.5
+
+- Add hash-pinned `capstan-promotion-receipt-v1` policies to candidate manifests.
+- Bind receipts to model/endpoint launch identity and current required-artifact fingerprints.
+- Validate receipt ownership, mode, link count, size, exact SHA-256, age, decision, and required gates.
+- Revalidate receipts under the promotion lifecycle lock before any rotation mutation.
+- Add `receipt fingerprint` and `receipt validate` operator commands.
+- Prove native Hy3 quality rejection blocks `promote --execute` before `Popen`.
+
 ## v0.24.4
 
 - Validate manifests and action results strictly so malformed lifecycle requests and ambiguous failures stop with non-zero exit codes.
