@@ -53,6 +53,21 @@ def _candidate_preflight_blocking_issues(current: ModelManifest, candidate: Mode
     return sorted(set(blocking)), tolerated
 
 
+def _promotion_receipt_guard(candidate: ModelManifest, *, required: bool) -> dict[str, Any]:
+    receipt = validate_promotion_receipt(candidate)
+    issues: list[str] = []
+    if receipt.get("ok") is not True:
+        issues.append("candidate_receipt_failed")
+    if required and receipt.get("configured") is not True:
+        issues.append("candidate_receipt_required")
+    return {
+        "ok": not issues,
+        "status": "valid" if not issues else "blocked",
+        "candidate_receipt": receipt,
+        "issues": issues,
+    }
+
+
 def _post_health_manifest(current: ModelManifest, candidate: ModelManifest) -> ModelManifest:
     """Use candidate health/smoke gates while keeping current PID ownership after handoff."""
     return replace(candidate, path=current.path, id=current.id, start=current.start)
@@ -141,7 +156,8 @@ def promote(
         with lifecycle_lock("promote", current, candidate):
             locked_current_preflight = preflight(current)
             locked_candidate_preflight = preflight(candidate)
-            locked_candidate_receipt = validate_promotion_receipt(candidate)
+            locked_receipt_guard = _promotion_receipt_guard(candidate, required=receipt_required)
+            locked_candidate_receipt = locked_receipt_guard["candidate_receipt"]
             locked_candidate_issues, locked_tolerated = _candidate_preflight_blocking_issues(
                 current, candidate, locked_candidate_preflight
             )
@@ -149,10 +165,7 @@ def promote(
             if not locked_current_preflight.get("ok"):
                 locked_issues.append("current_preflight_failed")
             locked_issues.extend(locked_candidate_issues)
-            if not locked_candidate_receipt.get("ok"):
-                locked_issues.append("candidate_receipt_failed")
-            if receipt_required and not locked_candidate_receipt.get("configured"):
-                locked_issues.append("candidate_receipt_required")
+            locked_issues.extend(locked_receipt_guard["issues"])
             if locked_issues:
                 return {
                     **common,
@@ -170,6 +183,7 @@ def promote(
                 readiness_timeout_sec=timeout,
                 stop_timeout_sec=stop_timeout_sec,
                 rollback=rollback,
+                target_pre_spawn_check=lambda: _promotion_receipt_guard(candidate, required=receipt_required),
             )
             if not rotation.get("ok"):
                 return {**common, "status": "rotation_failed", "rotation": rotation, "issues": ["rotation_failed"]}

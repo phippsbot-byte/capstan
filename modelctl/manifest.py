@@ -105,9 +105,9 @@ class ModelManifest:
     health: HealthConfig = field(default_factory=HealthConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
     smoke: SmokeConfig = field(default_factory=SmokeConfig)
+    cleanup: list[CleanupCandidate] = field(default_factory=list)
     promotion_requires_receipt: bool = False
     promotion_receipt: PromotionReceiptConfig | None = None
-    cleanup: list[CleanupCandidate] = field(default_factory=list)
 
     @property
     def models_url(self) -> str:
@@ -378,11 +378,17 @@ def load_manifest(path: str | Path) -> ModelManifest:
     promotion_requires_receipt = False
     if "promotion" in data:
         promotion_raw = _as_table(data, "promotion")
+        unknown_promotion = sorted(set(promotion_raw) - {"require_receipt", "receipt"})
+        if unknown_promotion:
+            raise ManifestError(f"[promotion] contains unknown keys: {', '.join(unknown_promotion)}")
         promotion_requires_receipt = _as_bool(promotion_raw.get("require_receipt", False), "promotion.require_receipt")
         if "receipt" in promotion_raw:
             receipt_raw = promotion_raw["receipt"]
             if not isinstance(receipt_raw, dict):
                 raise ManifestError("[promotion.receipt] must be a TOML table")
+            unknown_receipt = sorted(set(receipt_raw) - {"path", "sha256", "max_age_sec", "require_decision", "required_gates"})
+            if unknown_receipt:
+                raise ManifestError(f"[promotion.receipt] contains unknown keys: {', '.join(unknown_receipt)}")
             if "path" not in receipt_raw or "sha256" not in receipt_raw:
                 raise ManifestError("[promotion.receipt] requires path and sha256")
             receipt_sha256 = _as_str(receipt_raw["sha256"], "promotion.receipt.sha256", allow_empty=False).lower()
