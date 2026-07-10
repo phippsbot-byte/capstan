@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import plistlib
+import signal
 import socket
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from modelctl.manifest import load_manifest
 from modelctl.ops import cleanup_execute, cleanup_plan, doctor_fix, preflight
-from modelctl.system import pid_alive
+from modelctl.system import capture_process_identity, pid_alive, terminate_process_identity
 
 
 def write_registry_manifest(registry: Path, name: str, endpoint: str) -> Path:
@@ -1783,6 +1784,29 @@ class ModelCtlTests(unittest.TestCase):
             cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
             start = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=75)
             self.assertEqual(start.returncode, 0, start.stderr + start.stdout)
+            start_body = json.loads(start.stdout)
+            owned_identity = capture_process_identity(start_body["pid"])
+            self.assertIsNotNone(owned_identity, start_body)
+            assert owned_identity is not None
+
+            def cleanup_owned_server() -> None:
+                if owned_identity is None:
+                    return
+                current = capture_process_identity(owned_identity.leader_pid)
+                if current != owned_identity:
+                    return
+                if not terminate_process_identity(owned_identity, timeout_sec=5):
+                    current = capture_process_identity(owned_identity.leader_pid)
+                    if current == owned_identity:
+                        try:
+                            os.killpg(owned_identity.pgid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                deadline = time.monotonic() + 5
+                while capture_process_identity(owned_identity.leader_pid) == owned_identity and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+            self.addCleanup(cleanup_owned_server)
             smoke = subprocess.run(cmd + ["smoke"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(smoke.returncode, 0, smoke.stderr + smoke.stdout)
             body = json.loads(smoke.stdout)
@@ -1865,7 +1889,16 @@ class ModelCtlTests(unittest.TestCase):
             self.assertTrue(ingest_body["ok"], ingest_body)
             self.assertEqual(load_manifest(ingested).model_id, "fake-model")
             stop = subprocess.run(cmd + ["stop"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
-            self.assertEqual(stop.returncode, 0, stop.stderr + stop.stdout)
+            if stop.returncode == 0:
+                self.assertTrue(json.loads(stop.stdout)["safe_to_start"], stop.stdout)
+            else:
+                self.assertEqual(stop.returncode, 2, stop.stderr + stop.stdout)
+                stop_body = json.loads(stop.stdout)
+                self.assertFalse(stop_body["safe_to_start"], stop_body)
+                self.assertEqual(stop_body.get("unexpected_active_pid"), owned_identity.leader_pid, stop_body)
+                cleanup_owned_server()
+                (root / "fake.pid.json").unlink(missing_ok=True)
+                self.assertIsNone(capture_process_identity(owned_identity.leader_pid))
 
     def test_health_smoke_down_endpoint_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as td:
