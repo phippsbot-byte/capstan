@@ -18,6 +18,7 @@ from .manifest import ModelManifest
 from .system import (
     ProcessIdentity,
     capture_process_identity,
+    effective_launch_environment,
     live_process_group_members,
     prove_endpoint_owned_by_identity,
     reap_popen,
@@ -462,7 +463,25 @@ def _endpoint_owned(manifest: ModelManifest, identity: ProcessIdentity) -> dict[
     return {"owned": True, "owner_pids": sorted(proof.owner_pids), "identity": {"pid": identity.leader_pid, "pgid": identity.pgid, "birth_token": identity.birth_token}}
 
 
-def _start_locked(manifest: ModelManifest, wait: bool, readiness_timeout_sec: float | None = None) -> dict[str, Any]:
+def _run_pre_spawn_check(check: Callable[[], dict[str, Any]] | None) -> dict[str, Any] | None:
+    if check is None:
+        return None
+    try:
+        result = check()
+    except Exception as exc:
+        return {"ok": False, "status": "pre_spawn_check_exception", "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(result, dict):
+        return {"ok": False, "status": "pre_spawn_check_invalid", "error": "pre-spawn check must return an object"}
+    return result
+
+
+def _start_locked(
+    manifest: ModelManifest,
+    wait: bool,
+    readiness_timeout_sec: float | None = None,
+    *,
+    pre_spawn_check: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if manifest.start is None:
         raise RuntimeError("manifest has no [start] section")
     inspection = _inspect(manifest)
@@ -507,14 +526,28 @@ def _start_locked(manifest: ModelManifest, wait: bool, readiness_timeout_sec: fl
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = log_path.open("ab", buffering=0)
-        env = os.environ.copy()
-        env.update(manifest.start.env)
         cwd = Path(manifest.start.cwd or manifest.path.parent).expanduser()
         if not cwd.is_absolute():
             cwd = manifest.path.parent / cwd
+        cwd = cwd.resolve(strict=False)
+        env = effective_launch_environment(manifest.start.env, cwd=cwd)
+        pre_spawn = _run_pre_spawn_check(pre_spawn_check)
+        if pre_spawn is not None and pre_spawn.get("ok") is not True:
+            log.close()
+            log = None
+            removed, remove_error = _guarded_remove(manifest, lambda raw: _is_pending(manifest, raw, transaction_id))
+            return {
+                "ok": False,
+                "started": False,
+                "status": "pre_spawn_blocked",
+                "pre_spawn_check": pre_spawn,
+                "pending_removed": removed,
+                "state_error": remove_error,
+                **_durability_fields(manifest, transaction_id),
+            }
         proc = subprocess.Popen(
             manifest.start.command,
-            cwd=str(cwd.resolve(strict=False)),
+            cwd=str(cwd),
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -740,6 +773,7 @@ def _rotate_locked(
     readiness_timeout_sec: float,
     stop_timeout_sec: int,
     rollback: bool,
+    target_pre_spawn_check: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     base: dict[str, Any] = {
         "ok": False,
@@ -755,6 +789,16 @@ def _rotate_locked(
     old_identity = current_inspection.get("identity")
     old_pid = old_identity.leader_pid if current_inspection.get("status") == "live" and isinstance(old_identity, ProcessIdentity) else None
 
+    before_stop = _run_pre_spawn_check(target_pre_spawn_check)
+    if before_stop is not None and before_stop.get("ok") is not True:
+        return {
+            **base,
+            "status": "target_pre_spawn_blocked",
+            "old_pid": old_pid,
+            "pre_spawn_check": before_stop,
+            "issues": ["target_pre_spawn_blocked"],
+        }
+
     stop_current = _stop_locked(current, stop_timeout_sec)
     if stop_current.get("ok") is not True or stop_current.get("safe_to_start") is not True:
         return {
@@ -766,7 +810,10 @@ def _rotate_locked(
         }
 
     try:
-        target_start = _start_locked(target, True, readiness_timeout_sec)
+        if target_pre_spawn_check is None:
+            target_start = _start_locked(target, True, readiness_timeout_sec)
+        else:
+            target_start = _start_locked(target, True, readiness_timeout_sec, pre_spawn_check=target_pre_spawn_check)
     except Exception as exc:
         target_start = {"ok": False, "started": False, "status": "target_start_exception", "error": f"{type(exc).__name__}: {exc}"}
     if target_start.get("ok") is not True:

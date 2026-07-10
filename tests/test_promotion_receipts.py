@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from modelctl import cli
-from modelctl.manifest import ManifestError, load_manifest
+from modelctl.manifest import CleanupCandidate, FleetConfig, HealthConfig, ManifestError, ModelManifest, PreflightConfig, SmokeConfig, load_manifest
 from modelctl.receipt import MAX_ARTIFACT_HASH_BYTES, RECEIPT_SCHEMA, ReceiptError, candidate_binding, validate_promotion_receipt
 
 
@@ -91,12 +91,58 @@ class PromotionReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "64-character hexadecimal"):
                 load_manifest(path)
 
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(root)
+            with path.open("a") as handle:
+                handle.write("\n[promotion]\nrequire_reciept = true\n")
+            with self.assertRaisesRegex(ManifestError, "unknown keys: require_reciept"):
+                load_manifest(path)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(root, receipt_sha="0" * 64)
+            with path.open("a") as handle:
+                handle.write("max_age_secs = 60\n")
+            with self.assertRaisesRegex(ManifestError, "unknown keys: max_age_secs"):
+                load_manifest(path)
+
+    def test_model_manifest_preserves_pre_receipt_positional_cleanup_slot(self) -> None:
+        cleanup = [CleanupCandidate(path="/tmp/old", description="compat", safe=True)]
+        manifest = ModelManifest(
+            Path("/tmp/compat.toml"),
+            "compat",
+            "compat-model",
+            "http://127.0.0.1:1/v1",
+            "compat",
+            None,
+            PreflightConfig(),
+            HealthConfig(),
+            FleetConfig(),
+            SmokeConfig(),
+            cleanup,
+        )
+        self.assertIs(manifest.cleanup, cleanup)
+        self.assertFalse(manifest.promotion_requires_receipt)
+        self.assertIsNone(manifest.promotion_receipt)
+
     def test_candidate_binding_is_deterministic_and_detects_artifact_or_launch_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             first = candidate_binding(load_manifest(self.write_manifest(root)))
             second = candidate_binding(load_manifest(self.write_manifest(root)))
             self.assertEqual(first["candidate_fingerprint"], second["candidate_fingerprint"])
+            with patch.dict(os.environ, {"CAPSTAN_EFFECTIVE_ENV_TEST": "one"}):
+                inherited_one = candidate_binding(load_manifest(self.write_manifest(root)))
+            with patch.dict(os.environ, {"CAPSTAN_EFFECTIVE_ENV_TEST": "two"}):
+                inherited_two = candidate_binding(load_manifest(self.write_manifest(root)))
+            self.assertNotEqual(inherited_one["candidate_fingerprint"], inherited_two["candidate_fingerprint"])
+            self.assertNotIn("CAPSTAN_EFFECTIVE_ENV_TEST", json.dumps(inherited_one))
+            with patch.dict(os.environ, {"_": "/first", "SHLVL": "9", "OLDPWD": "/first"}):
+                volatile_one = candidate_binding(load_manifest(self.write_manifest(root)))
+            with patch.dict(os.environ, {"_": "/second", "SHLVL": "1", "OLDPWD": "/second"}):
+                volatile_two = candidate_binding(load_manifest(self.write_manifest(root)))
+            self.assertEqual(volatile_one["candidate_fingerprint"], volatile_two["candidate_fingerprint"])
             (root / "artifact.bin").write_bytes(b"artifact-v2")
             artifact_changed = candidate_binding(load_manifest(self.write_manifest(root)))
             self.assertNotEqual(first["candidate_fingerprint"], artifact_changed["candidate_fingerprint"])
@@ -246,11 +292,45 @@ class PromotionReceiptTests(unittest.TestCase):
             current_text = candidate_path.read_text().replace('id = "candidate"', 'id = "current"').split("\n[promotion.receipt]", 1)[0]
             current_path.write_text(current_text)
             current = load_manifest(current_path)
-            result = promote(current, candidate, execute=True)
+            from modelctl import runner
+            with patch.object(runner.subprocess, "Popen") as popen:
+                result = promote(current, candidate, execute=True)
             self.assertEqual(result["status"], "blocked", result)
             self.assertIn("candidate_receipt_failed", result["issues"])
             self.assertIn("receipt_decision_rejected", result["candidate_receipt"]["issues"])
             self.assertFalse((root / "candidate.pid.json").exists())
+            popen.assert_not_called()
+
+    def test_runner_pre_spawn_guards_block_before_stop_and_popen(self) -> None:
+        from modelctl import runner
+
+        invalid = {"ok": False, "status": "blocked", "issues": ["candidate_receipt_failed"]}
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            manifest = load_manifest(self.write_manifest(root))
+            with patch.object(runner.subprocess, "Popen") as popen:
+                started = runner._start_locked(manifest, False, pre_spawn_check=lambda: invalid)
+            self.assertEqual(started["status"], "pre_spawn_blocked", started)
+            self.assertFalse(started["started"])
+            self.assertTrue(started["pending_removed"], started)
+            self.assertFalse((root / "candidate.pid.json").exists())
+            popen.assert_not_called()
+
+            with (
+                patch.object(runner, "_stop_locked") as stop_locked,
+                patch.object(runner.subprocess, "Popen") as popen,
+            ):
+                rotated = runner._rotate_locked(
+                    manifest,
+                    manifest,
+                    readiness_timeout_sec=5,
+                    stop_timeout_sec=5,
+                    rollback=True,
+                    target_pre_spawn_check=lambda: invalid,
+                )
+            self.assertEqual(rotated["status"], "target_pre_spawn_blocked", rotated)
+            stop_locked.assert_not_called()
+            popen.assert_not_called()
 
     def test_stable_policy_or_cli_can_require_candidate_receipt_presence(self) -> None:
         from modelctl.promote import promote

@@ -9,7 +9,7 @@ import stat
 from typing import Any
 
 from .manifest import ModelManifest
-from .system import command_cwd_fingerprint
+from .system import command_cwd_fingerprint, effective_launch_environment
 
 RECEIPT_SCHEMA = "capstan-promotion-receipt-v1"
 MAX_RECEIPT_BYTES = 1024 * 1024
@@ -58,7 +58,8 @@ def candidate_binding(manifest: ModelManifest) -> dict[str, Any]:
         raise ReceiptError("candidate manifest has no [start] configuration")
     cwd = manifest.start.cwd or str(manifest.path.parent)
     artifacts = [_artifact_binding(path) for path in sorted(set(manifest.preflight.required_paths))]
-    environment_bytes = json.dumps(manifest.start.env, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    effective_env = effective_launch_environment(manifest.start.env, cwd=cwd)
+    environment_bytes = json.dumps(effective_env, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     payload = {
         "model_id": manifest.model_id,
         "endpoint": manifest.endpoint,
