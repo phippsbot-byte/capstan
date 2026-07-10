@@ -17,7 +17,7 @@ These documents define the current authority chain and the move from guarded pro
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.4/local_modelctl-0.24.4-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.5/local_modelctl-0.24.5-py3-none-any.whl
 ```
 
 For local development:
@@ -84,8 +84,10 @@ capstan service diff --restart --interval 120
 capstan service start
 capstan service status
 capstan rotate --to candidate.toml --readiness-timeout 300
+capstan -m candidate.toml receipt fingerprint
+capstan -m candidate.toml receipt validate
 capstan promote --candidate candidate.toml          # plan only
-capstan promote --candidate candidate.toml --execute --smoke --readiness-timeout 300
+capstan promote --candidate candidate.toml --execute --require-receipt --smoke --readiness-timeout 300
 capstan watchdog --max-swap-gib 4 --duration 0
 capstan status
 capstan cleanup          # dry-run
@@ -174,7 +176,8 @@ safe = true
 - `preflight` — check paths, exclusive ports, disk floor, and swap ceiling.
 - `start --wait` — start server in its own process group, write PID state, optionally wait for readiness.
 - `rotate --to TARGET.toml` — stop the current manifest process, start a same-endpoint/same-model target, verify readiness, then atomically move target PID ownership to the current manifest PID path; failed target readiness rolls back unless `--no-rollback` is set.
-- `promote --candidate TARGET.toml [--execute]` — plan or execute a full promotion: current/candidate preflight, rotate dry-run, readiness-gated rotate, post-promotion health, and rollback if the post-health gate fails.
+- `receipt fingerprint|validate` — inspect the candidate launch/artifact binding or validate a configured hash-pinned benchmark receipt. See [`docs/promotion-receipts.md`](docs/promotion-receipts.md).
+- `promote --candidate TARGET.toml [--execute]` — plan or execute a full promotion: current/candidate preflight, optional receipt-policy validation, rotate dry-run, readiness-gated rotate, post-promotion health, and rollback if the post-health gate fails.
 - `wait` — wait for readiness URL/model string.
 - `status` — print PID/readiness/log/swap state.
 - `health [--max-swap-delta-gib N] [--smoke]` — one high-signal health verdict for PID, readiness, swap ceiling/delta, optional smoke latency, and manifest `[health]` defaults. OpenAI-style server timings are surfaced as `latency.server_prompt_s` / `latency.server_completion_s`; use `max_prompt_latency_sec` and `max_completion_latency_sec` to warn on slow prefill/decode without failing basic liveness.
