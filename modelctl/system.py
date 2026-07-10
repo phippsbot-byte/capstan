@@ -974,6 +974,22 @@ prove_listener_owned_by_identity = prove_endpoint_owned_by_identity
 prove_endpoint_owned_by_process_identity = prove_endpoint_owned_by_identity
 
 
+def effective_launch_environment(
+    overrides: dict[str, str] | None = None,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+) -> dict[str, str]:
+    """Return the exact environment inherited by a managed child process."""
+    env = dict(os.environ)
+    for volatile_key in ("_", "SHLVL", "OLDPWD"):
+        env.pop(volatile_key, None)
+    if cwd is not None:
+        env["PWD"] = os.path.realpath(os.path.abspath(os.fspath(cwd)))
+    if overrides:
+        env.update(overrides)
+    return env
+
+
 def command_cwd_fingerprint(command: Sequence[str], cwd: str | os.PathLike[str]) -> str:
     """Return a stable SHA-256 fingerprint for command/cwd PID-state metadata."""
     if isinstance(command, (str, bytes)) or not isinstance(command, Sequence) or not command:
