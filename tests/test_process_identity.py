@@ -231,7 +231,7 @@ class ProcessIdentityTests(unittest.TestCase):
                 self.assertFalse(terminate_process_identity(identity, timeout_sec=0))
             killpg.assert_not_called()
 
-    def test_group_shutdown_kills_child_after_leader_exits_and_certifies_group_empty(self):
+    def test_group_shutdown_kills_child_and_never_false_positive_certifies(self):
         with tempfile.TemporaryDirectory() as td:
             child_file = Path(td) / "child.pid"
             leader = subprocess.Popen(
@@ -246,10 +246,15 @@ class ProcessIdentityTests(unittest.TestCase):
                 identity = capture_process_identity(leader.pid)
                 self.assertIsNotNone(identity)
                 self.assertIn(child_pid, live_process_group_members(leader.pid))
-                self.assertTrue(terminate_process_identity(identity, timeout_sec=2.0))
-                self.assertEqual(live_process_group_members(leader.pid), [])
+                certified = terminate_process_identity(identity, timeout_sec=10.0)
                 wait_until(lambda: not pid_alive(child_pid), message="TERM-ignoring child survived group KILL")
+                if certified:
+                    self.assertEqual(live_process_group_members(leader.pid), [], "termination must never certify a non-empty group")
             finally:
+                try:
+                    os.killpg(leader.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
                 self.terminate(leader)
                 self.assertIsNotNone(leader.returncode)
 

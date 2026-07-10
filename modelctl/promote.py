@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from .lifecycle import LifecycleLockError, lifecycle_lock
 from .manifest import ModelManifest
 from .ops import health, preflight
+from .receipt import validate_promotion_receipt
 from .runner import _rotate_locked, _start_locked, _stop_locked, rotate
 
 
@@ -70,11 +71,13 @@ def promote(
     sample_sec: float | None = None,
     include_smoke: bool = False,
     max_latency_sec: float | None = None,
+    require_receipt: bool = False,
 ) -> dict[str, Any]:
     """Promote a candidate manifest through preflight, rotate, and post-health gating.
 
     Plan-only by default. `execute=True` performs the stop/start rotation.
     """
+    receipt_required = bool(require_receipt or current.promotion_requires_receipt)
     base: dict[str, Any] = {
         "ok": False,
         "action": "promote",
@@ -84,6 +87,7 @@ def promote(
         "readiness_timeout_sec": readiness_timeout_sec,
         "stop_timeout_sec": stop_timeout_sec,
         "rollback_enabled": rollback,
+        "receipt_required": receipt_required,
         "health_options": {
             "max_swap_gib": max_swap_gib,
             "max_swap_delta_gib": max_swap_delta_gib,
@@ -95,6 +99,7 @@ def promote(
 
     current_preflight = preflight(current)
     candidate_preflight = preflight(candidate)
+    candidate_receipt = validate_promotion_receipt(candidate)
     rotate_plan = rotate(
         current,
         candidate,
@@ -110,11 +115,16 @@ def promote(
     issues.extend(candidate_issues)
     if not rotate_plan.get("ok"):
         issues.append("rotate_plan_failed")
+    if not candidate_receipt.get("ok"):
+        issues.append("candidate_receipt_failed")
+    if receipt_required and not candidate_receipt.get("configured"):
+        issues.append("candidate_receipt_required")
 
     common = {
         **base,
         "current_preflight": current_preflight,
         "candidate_preflight": candidate_preflight,
+        "candidate_receipt": candidate_receipt,
         "tolerated_candidate_preflight": tolerated_candidate_preflight,
         "rotate_plan": rotate_plan,
         "issues": issues,
@@ -131,6 +141,7 @@ def promote(
         with lifecycle_lock("promote", current, candidate):
             locked_current_preflight = preflight(current)
             locked_candidate_preflight = preflight(candidate)
+            locked_candidate_receipt = validate_promotion_receipt(candidate)
             locked_candidate_issues, locked_tolerated = _candidate_preflight_blocking_issues(
                 current, candidate, locked_candidate_preflight
             )
@@ -138,12 +149,17 @@ def promote(
             if not locked_current_preflight.get("ok"):
                 locked_issues.append("current_preflight_failed")
             locked_issues.extend(locked_candidate_issues)
+            if not locked_candidate_receipt.get("ok"):
+                locked_issues.append("candidate_receipt_failed")
+            if receipt_required and not locked_candidate_receipt.get("configured"):
+                locked_issues.append("candidate_receipt_required")
             if locked_issues:
                 return {
                     **common,
                     "status": "blocked_after_lock",
                     "current_preflight": locked_current_preflight,
                     "candidate_preflight": locked_candidate_preflight,
+                    "candidate_receipt": locked_candidate_receipt,
                     "tolerated_candidate_preflight": locked_tolerated,
                     "issues": locked_issues,
                 }
