@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.24.6
+
+- Bind promotion receipts to the exact effective child environment, including inherited variables plus `[start.env]` overrides, without exposing values.
+- Reject unknown keys in `[promotion]` and `[promotion.receipt]` so policy typos fail closed.
+- Preserve the pre-receipt positional `ModelManifest(..., smoke, cleanup)` API.
+- Revalidate the candidate receipt before stopping stable and again inside `_start_locked` immediately before `Popen`.
+- Add explicit regressions proving failed receipt guards do not call `Popen` or stop the stable lane.
+- Document the same-user filesystem race boundary and immutable-snapshot requirement for adversarial guarantees.
+
 ## v0.24.5
 
 - Add hash-pinned `capstan-promotion-receipt-v1` policies to candidate manifests.
