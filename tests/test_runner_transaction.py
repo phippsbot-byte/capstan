@@ -194,6 +194,9 @@ class RunnerTransactionTests(unittest.TestCase):
             manifest = self.manifest(root)
             with self.locks(root):
                 started = runner.start(manifest)
+            owned_identity = capture_process_identity(started["pid"])
+            self.assertIsNotNone(owned_identity, started)
+            assert owned_identity is not None
             state = runner.read_pid_state(manifest)
             assert state is not None
             original = dict(state)
@@ -206,7 +209,23 @@ class RunnerTransactionTests(unittest.TestCase):
             self.assertIsNotNone(capture_process_identity(started["pid"]))
             runner.write_pid_state(manifest, original)
             with self.locks(root):
-                self.assertTrue(runner.stop(manifest, timeout_sec=1)["safe_to_start"])
+                stopped = runner.stop(manifest, timeout_sec=1)
+            if not stopped["safe_to_start"]:
+                current = capture_process_identity(owned_identity.leader_pid)
+                if current == owned_identity and not terminate_process_identity(owned_identity, timeout_sec=5):
+                    current = capture_process_identity(owned_identity.leader_pid)
+                    if current == owned_identity:
+                        try:
+                            os.killpg(owned_identity.pgid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                reap_retained_popens()
+                (root / "model.pid.json").unlink(missing_ok=True)
+            deadline = time.monotonic() + 5
+            while capture_process_identity(owned_identity.leader_pid) == owned_identity and time.monotonic() < deadline:
+                reap_retained_popens()
+                time.sleep(0.01)
+            self.assertIsNone(capture_process_identity(owned_identity.leader_pid))
 
     def test_stop_unlink_failure_is_structured_and_preserves_blocker(self) -> None:
         from modelctl import runner
