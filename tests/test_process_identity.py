@@ -246,7 +246,10 @@ class ProcessIdentityTests(unittest.TestCase):
                 identity = capture_process_identity(leader.pid)
                 self.assertIsNotNone(identity)
                 self.assertIn(child_pid, live_process_group_members(leader.pid))
-                self.assertTrue(terminate_process_identity(identity, timeout_sec=2.0))
+                # Match the production stop grace period. GitHub arm64 macOS
+                # runners can take more than two seconds to schedule/reap the
+                # TERM-ignoring child after the group SIGKILL.
+                self.assertTrue(terminate_process_identity(identity, timeout_sec=10.0))
                 self.assertEqual(live_process_group_members(leader.pid), [])
                 wait_until(lambda: not pid_alive(child_pid), message="TERM-ignoring child survived group KILL")
             finally:
