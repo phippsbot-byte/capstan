@@ -13,6 +13,7 @@ import threading
 import time
 import tomllib
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from modelctl.manifest import load_manifest
@@ -41,7 +42,7 @@ class ModelCtlTests(unittest.TestCase):
     def test_pyproject_exposes_capstan_primary_cli_with_modelctl_compat(self):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(pyproject["project"]["name"], "local-modelctl")
-        self.assertEqual(pyproject["project"]["version"], "0.24.3")
+        self.assertEqual(pyproject["project"]["version"], "0.24.4")
         self.assertIn("Capstan", pyproject["project"]["description"])
         scripts = pyproject["project"]["scripts"]
         self.assertEqual(scripts["capstan"], "capstan.cli:main")
@@ -101,6 +102,9 @@ class ModelCtlTests(unittest.TestCase):
                 write_registry_manifest(registry, f"m{idx}", f"http://127.0.0.1:{9000 + idx}/v1")
 
             calls: list[tuple[str, float]] = []
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
             original_readiness = fleet_mod.readiness_check
             original_active_pid = fleet_mod.active_pid
             original_pid_state = fleet_mod.read_pid_state
@@ -110,8 +114,14 @@ class ModelCtlTests(unittest.TestCase):
             original_registry_env = os.environ.get("MODELCTL_REGISTRY")
 
             def slow_readiness(manifest, timeout=10):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
                 time.sleep(0.2)
-                calls.append((manifest.id, timeout))
+                with lock:
+                    active -= 1
+                    calls.append((manifest.id, timeout))
                 return {"ready": False, "status": 599, "url": manifest.models_url}
 
             try:
@@ -122,9 +132,7 @@ class ModelCtlTests(unittest.TestCase):
                 fleet_mod.swap_used_gib = lambda: 0.0
                 os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
                 os.environ.pop("MODELCTL_REGISTRY", None)
-                started = time.perf_counter()
                 result = fleet_mod.fleet_status(registries=[str(registry)], readiness_timeout=0.25)
-                elapsed = time.perf_counter() - started
             finally:
                 fleet_mod.readiness_check = original_readiness
                 fleet_mod.active_pid = original_active_pid
@@ -142,7 +150,7 @@ class ModelCtlTests(unittest.TestCase):
 
             self.assertTrue(result["ok"], result)
             self.assertEqual([row["id"] for row in result["models"]], ["m0", "m1", "m2", "m3"])
-            self.assertLess(elapsed, 0.45, f"fleet status should not scan readiness serially; elapsed={elapsed:.3f}s")
+            self.assertGreaterEqual(max_active, 2, f"fleet status should overlap readiness checks; max_active={max_active}")
             self.assertEqual(sorted(calls), [("m0", 0.25), ("m1", 0.25), ("m2", 0.25), ("m3", 0.25)])
 
     def test_fleet_health_checks_entries_concurrently_with_jobs_and_timing(self):
@@ -402,7 +410,7 @@ class ModelCtlTests(unittest.TestCase):
             self.assertIn("duplicate_port", issue_codes)
             self.assertIn("required_path_missing", issue_codes)
             self.assertIn("service_orphan", issue_codes)
-            self.assertIn("stale_pid_state", warning_codes)
+            self.assertIn("pid_state_owner_mismatch", warning_codes)
             self.assertEqual(result["summary"]["issues"], len(result["issues"]))
             self.assertEqual(result["summary"]["warnings"], len(result["warnings"]))
 
@@ -1363,31 +1371,24 @@ class ModelCtlTests(unittest.TestCase):
                 '''), encoding="utf-8")
             current = load_manifest(current_path)
             target = load_manifest(target_path)
-            original_active_pid = runner.active_pid
-            original_stop = runner.stop
-            original_start = runner.start
-            original_wait_ready = runner.wait_ready
-            try:
-                runner.active_pid = lambda manifest: 111 if manifest.id == "current" else 222
-                runner.stop = lambda manifest, timeout_sec=10: {"stopped": True, "pid": 111 if manifest.id == "current" else 222}
-                def fake_start(manifest, wait=False):
-                    runner.write_pid_state(manifest, {"pid": 222, "manifest": str(manifest.path)})
-                    return {"started": True, "pid": 222, "pid_path": str(runner.default_pid_path(manifest))}
-                runner.start = fake_start
-                runner.wait_ready = lambda _manifest, timeout_sec=None: {"ready": True}
+            with (
+                patch.object(runner, "lifecycle_lock") as lock,
+                patch.object(runner, "_inspect", return_value={"status": "absent"}),
+                patch.object(runner, "_stop_locked", return_value={"ok": True, "safe_to_start": True, "already_stopped": True}) as stop_locked,
+                patch.object(runner, "_start_locked", return_value={"ok": True, "started": True, "pid": 222, "readiness": {"ready": True}, "endpoint_ownership": {"owned": True}}) as start_locked,
+                patch.object(runner, "_rotation_handoff_locked", return_value={"transactional": True, "identity": {"pid": 222}}) as handoff,
+                patch.object(runner, "start") as public_start,
+                patch.object(runner, "stop") as public_stop,
+            ):
                 result = runner.rotate(current, target)
-            finally:
-                runner.active_pid = original_active_pid
-                runner.stop = original_stop
-                runner.start = original_start
-                runner.wait_ready = original_wait_ready
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["status"], "rotated")
-            self.assertFalse((root / "target.pid.json").exists())
-            state = json.loads((root / "current.pid.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["pid"], 222)
-            self.assertEqual(state["manifest"], str(current_path.resolve()))
-            self.assertEqual(state["source_manifest"], str(target_path.resolve()))
+            lock.assert_called_once_with("rotate", current, target)
+            stop_locked.assert_called_once_with(current, 10)
+            start_locked.assert_called_once_with(target, True, 120.0)
+            handoff.assert_called_once_with(current, target)
+            public_start.assert_not_called()
+            public_stop.assert_not_called()
 
     def test_promote_dry_run_plans_preflight_and_rotate_without_side_effects(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1466,11 +1467,9 @@ class ModelCtlTests(unittest.TestCase):
                 id = "current"
                 model_id = "stable-model"
                 endpoint = "http://127.0.0.1:9000/v1"
-
                 [start]
                 command = ["noop"]
                 pid_path = "{root / 'current.pid.json'}"
-
                 [smoke]
                 prompt = "current"
                 expect = "current-ok"
@@ -1480,37 +1479,32 @@ class ModelCtlTests(unittest.TestCase):
                 id = "target"
                 model_id = "stable-model"
                 endpoint = "http://127.0.0.1:9000/v1"
-
                 [start]
                 command = ["noop"]
                 pid_path = "{root / 'target.pid.json'}"
-
                 [health]
                 smoke = true
-
                 [smoke]
                 prompt = "candidate"
                 expect = "candidate-ok"
             '''), encoding="utf-8")
             current = load_manifest(current_path)
             target = load_manifest(target_path)
-            original_preflight = promote_mod.preflight
-            original_rotate = promote_mod.rotate
-            original_health = promote_mod.health
-            try:
-                promote_mod.preflight = lambda manifest: {"ok": True, "id": manifest.id}
-                promote_mod.rotate = lambda *args, **kwargs: {"ok": True, "status": "rotated", "new_pid": 222}
-                def fake_health(manifest, **_kwargs):
-                    return {"ok": manifest.smoke.expect == "candidate-ok" and manifest.start == current.start, "status": "ok" if manifest.smoke.expect == "candidate-ok" else "critical", "expect": manifest.smoke.expect}
-                promote_mod.health = fake_health
+            def fake_health(manifest, **_kwargs):
+                return {"ok": manifest.smoke.expect == "candidate-ok" and manifest.start == current.start, "status": "ok", "expect": manifest.smoke.expect}
+            with (
+                patch.object(promote_mod, "preflight", side_effect=lambda manifest: {"ok": True, "id": manifest.id}),
+                patch.object(promote_mod, "rotate", return_value={"ok": True, "status": "planned"}),
+                patch.object(promote_mod, "_rotate_locked", return_value={"ok": True, "status": "rotated", "new_pid": 222}) as rotate_locked,
+                patch.object(promote_mod, "health", side_effect=fake_health),
+                patch.object(promote_mod, "lifecycle_lock") as lock,
+            ):
                 result = promote_mod.promote(current, target, execute=True)
-            finally:
-                promote_mod.preflight = original_preflight
-                promote_mod.rotate = original_rotate
-                promote_mod.health = original_health
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["status"], "promoted")
             self.assertEqual(result["post_health"]["expect"], "candidate-ok")
+            lock.assert_called_once_with("promote", current, target)
+            rotate_locked.assert_called_once()
 
     def test_promote_execute_rolls_back_on_post_health_failure(self):
         from modelctl import promote as promote_mod
@@ -1524,7 +1518,6 @@ class ModelCtlTests(unittest.TestCase):
                     id = "{ident}"
                     model_id = "stable-model"
                     endpoint = "http://127.0.0.1:9000/v1"
-
                     [start]
                     command = ["noop"]
                     pid_path = "{root / (ident + '.pid.json')}"
@@ -1532,33 +1525,19 @@ class ModelCtlTests(unittest.TestCase):
                 '''), encoding="utf-8")
             current = load_manifest(current_path)
             target = load_manifest(target_path)
-            original_preflight = promote_mod.preflight
-            original_rotate = promote_mod.rotate
-            original_health = promote_mod.health
-            original_stop = promote_mod.stop
-            original_start = promote_mod.start
-            original_wait_ready = promote_mod.wait_ready
-            calls: list[str] = []
-            try:
-                promote_mod.preflight = lambda manifest: {"ok": True, "id": manifest.id}
-                promote_mod.rotate = lambda *args, **kwargs: {"ok": True, "status": "rotated", "new_pid": 222}
-                promote_mod.health = lambda *args, **kwargs: {"ok": False, "status": "critical", "issues": ["smoke"], "warnings": []}
-                promote_mod.stop = lambda manifest, timeout_sec=10: calls.append(f"stop:{manifest.id}") or {"stopped": True, "pid": 222}
-                promote_mod.start = lambda manifest, wait=False: calls.append(f"start:{manifest.id}") or {"started": True, "pid": 333}
-                promote_mod.wait_ready = lambda manifest, timeout_sec=None: calls.append(f"wait:{manifest.id}") or {"ready": True}
+            with (
+                patch.object(promote_mod, "preflight", side_effect=lambda manifest: {"ok": True, "id": manifest.id}),
+                patch.object(promote_mod, "rotate", return_value={"ok": True, "status": "planned"}),
+                patch.object(promote_mod, "_rotate_locked", return_value={"ok": True, "status": "rotated", "new_pid": 222}),
+                patch.object(promote_mod, "health", return_value={"ok": False, "status": "critical", "issues": ["smoke"]}),
+                patch.object(promote_mod, "_rollback_promoted_locked", return_value={"attempted": True, "ok": True}) as rollback_locked,
+                patch.object(promote_mod, "lifecycle_lock"),
+            ):
                 result = promote_mod.promote(current, target, execute=True, include_smoke=True)
-            finally:
-                promote_mod.preflight = original_preflight
-                promote_mod.rotate = original_rotate
-                promote_mod.health = original_health
-                promote_mod.stop = original_stop
-                promote_mod.start = original_start
-                promote_mod.wait_ready = original_wait_ready
             self.assertFalse(result["ok"], result)
             self.assertEqual(result["status"], "post_health_failed")
-            self.assertEqual(result["rotation"]["status"], "rotated")
             self.assertTrue(result["rollback"]["attempted"], result)
-            self.assertEqual(calls, ["stop:current", "start:current", "wait:current"])
+            rollback_locked.assert_called_once_with(current, stop_timeout_sec=10, readiness_timeout_sec=None)
 
     def test_rotate_rejects_identity_mismatch_and_bad_timeouts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1650,32 +1629,23 @@ class ModelCtlTests(unittest.TestCase):
                     id = "{ident}"
                     model_id = "stable-model"
                     endpoint = "http://127.0.0.1:9000/v1"
-
                     [start]
                     command = ["noop"]
                     pid_path = "{root / (ident + '.pid.json')}"
                 '''), encoding="utf-8")
             current = load_manifest(current_path)
             target = load_manifest(target_path)
-            original_active_pid = runner.active_pid
-            original_stop = runner.stop
-            original_start = runner.start
-            original_wait_ready = runner.wait_ready
-            try:
-                runner.active_pid = lambda _manifest: 123
-                runner.stop = lambda _manifest, timeout_sec=10: {"stopped": True, "pid": 123}
-                def fake_start(manifest, wait=False):
-                    if manifest.id == "target":
-                        raise RuntimeError("boom")
-                    return {"started": True, "pid": 456}
-                runner.start = fake_start
-                runner.wait_ready = lambda _manifest, timeout_sec=None: {"ready": True}
+            def fake_start(manifest, wait, timeout):
+                if manifest.id == "target":
+                    raise RuntimeError("boom")
+                return {"ok": True, "started": True, "pid": 456, "readiness": {"ready": True}}
+            with (
+                patch.object(runner, "lifecycle_lock"),
+                patch.object(runner, "_inspect", return_value={"status": "absent"}),
+                patch.object(runner, "_stop_locked", return_value={"ok": True, "safe_to_start": True}),
+                patch.object(runner, "_start_locked", side_effect=fake_start),
+            ):
                 result = runner.rotate(current, target)
-            finally:
-                runner.active_pid = original_active_pid
-                runner.stop = original_stop
-                runner.start = original_start
-                runner.wait_ready = original_wait_ready
             self.assertFalse(result["ok"], result)
             self.assertEqual(result["status"], "target_start_failed")
             self.assertTrue(result["rollback"]["attempted"], result)
@@ -1693,43 +1663,25 @@ class ModelCtlTests(unittest.TestCase):
                     id = "{ident}"
                     model_id = "stable-model"
                     endpoint = "http://127.0.0.1:9000/v1"
-
                     [start]
                     command = ["noop"]
                     pid_path = "{root / (ident + '.pid.json')}"
                 '''), encoding="utf-8")
             current = load_manifest(current_path)
             target = load_manifest(target_path)
-            original_active_pid = runner.active_pid
-            original_stop = runner.stop
-            original_start = runner.start
-            original_wait_ready = runner.wait_ready
-            original_replace = runner.os.replace
-            stopped: list[str] = []
-            try:
-                runner.active_pid = lambda manifest: 123 if manifest.id == "current" else 456
-                def fake_stop(manifest, timeout_sec=10):
-                    stopped.append(manifest.id)
-                    return {"stopped": True, "pid": 123 if manifest.id == "current" else 456}
-                runner.stop = fake_stop
-                def fake_start(manifest, wait=False):
-                    if manifest.id == "target":
-                        runner.write_pid_state(target, {"pid": 456, "manifest": str(target.path)})
-                        runner.os.replace = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace boom"))
-                        return {"started": True, "pid": 456}
-                    return {"started": True, "pid": 789}
-                runner.start = fake_start
-                runner.wait_ready = lambda _manifest, timeout_sec=None: {"ready": True}
+            def fake_start(manifest, wait, timeout):
+                return {"ok": True, "started": True, "pid": 456 if manifest.id == "target" else 789, "readiness": {"ready": True}, "endpoint_ownership": {"owned": True}}
+            with (
+                patch.object(runner, "lifecycle_lock"),
+                patch.object(runner, "_inspect", return_value={"status": "absent"}),
+                patch.object(runner, "_stop_locked", return_value={"ok": True, "safe_to_start": True}),
+                patch.object(runner, "_start_locked", side_effect=fake_start),
+                patch.object(runner, "_rotation_handoff_locked", side_effect=OSError("replace boom")),
+            ):
                 result = runner.rotate(current, target)
-            finally:
-                runner.active_pid = original_active_pid
-                runner.stop = original_stop
-                runner.start = original_start
-                runner.wait_ready = original_wait_ready
-                runner.os.replace = original_replace
             self.assertFalse(result["ok"], result)
             self.assertEqual(result["status"], "handoff_failed")
-            self.assertIn("target", stopped)
+            self.assertIn("replace boom", result["error"])
             self.assertTrue(result["rollback"]["attempted"], result)
 
     def test_cleanup_dry_run_and_safe_execute(self):
@@ -1813,7 +1765,9 @@ class ModelCtlTests(unittest.TestCase):
                 cwd = "{root}"
                 log_path = "{root / 'fake.log'}"
                 pid_path = "{root / 'fake.pid.json'}"
-                startup_timeout_sec = 20
+                # GitHub's arm64 macOS runners can take >20s to schedule a
+                # freshly spawned Python HTTP server under load.
+                startup_timeout_sec = 60
                 readiness_url = "http://127.0.0.1:{port}/v1/models"
                 readiness_contains = "fake-model"
 
@@ -1827,7 +1781,7 @@ class ModelCtlTests(unittest.TestCase):
                 temperature = 0
             ''')
             cmd = [sys.executable, "-m", "modelctl.cli", "-m", str(manifest_path)]
-            start = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            start = subprocess.run(cmd + ["start", "--wait"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=75)
             self.assertEqual(start.returncode, 0, start.stderr + start.stdout)
             smoke = subprocess.run(cmd + ["smoke"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(smoke.returncode, 0, smoke.stderr + smoke.stdout)
@@ -2206,8 +2160,8 @@ class ModelCtlTests(unittest.TestCase):
             self.assertEqual(fix.returncode, 0, fix.stderr + fix.stdout)
             fix_body = json.loads(fix.stdout)
             self.assertTrue(fix_body["ok"], fix_body)
-            self.assertFalse(pid_path.exists())
-            self.assertIn("stale_pid_state_removed", [item["code"] for item in fix_body["fixes"]])
+            self.assertTrue(pid_path.exists())
+            self.assertIn("pid_state_owner_mismatch_preserved", [item["code"] for item in fix_body["fixes"]])
             self.assertTrue(log_path.parent.exists())
             pretty = subprocess.run([sys.executable, "-m", "modelctl.cli", "--pretty", "-m", str(manifest_path), "validate"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             self.assertEqual(pretty.returncode, 0, pretty.stderr + pretty.stdout)

@@ -4,24 +4,22 @@ from dataclasses import replace
 from typing import Any
 from urllib.parse import urlparse
 
+from .lifecycle import LifecycleLockError, lifecycle_lock
 from .manifest import ModelManifest
 from .ops import health, preflight
-from .runner import rotate, start, stop, wait_ready
+from .runner import _rotate_locked, _start_locked, _stop_locked, rotate
 
 
 def _manifest_ref(manifest: ModelManifest) -> dict[str, Any]:
     return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "path": str(manifest.path)}
 
 
-def _rollback_current(current: ModelManifest, *, stop_timeout_sec: int, readiness_timeout_sec: float | None) -> dict[str, Any]:
-    try:
-        stopped = stop(current, timeout_sec=stop_timeout_sec)
-        started = start(current, wait=False)
-        timeout = readiness_timeout_sec if readiness_timeout_sec is not None else (current.start.startup_timeout_sec if current.start else None)
-        readiness = wait_ready(current, timeout_sec=timeout)
-        return {"attempted": True, "stop": stopped, "start": started, "readiness": readiness}
-    except Exception as exc:
-        return {"attempted": True, "error": f"{type(exc).__name__}: {exc}"}
+def _rollback_promoted_locked(current: ModelManifest, *, stop_timeout_sec: int, readiness_timeout_sec: float | None) -> dict[str, Any]:
+    stopped = _stop_locked(current, stop_timeout_sec)
+    if stopped.get("safe_to_start") is not True:
+        return {"attempted": True, "ok": False, "stop": stopped, "error": "promoted process could not be stopped safely"}
+    started = _start_locked(current, True, readiness_timeout_sec)
+    return {"attempted": True, "ok": started.get("ok") is True, "stop": stopped, "start": started}
 
 
 def _endpoint_port(manifest: ModelManifest) -> int | None:
@@ -126,37 +124,71 @@ def promote(
     if not execute:
         return {**common, "ok": True, "status": "planned"}
 
-    rotation = rotate(
-        current,
-        candidate,
-        readiness_timeout_sec=readiness_timeout_sec,
-        stop_timeout_sec=stop_timeout_sec,
-        rollback=rollback,
-        dry_run=False,
-    )
-    if not rotation.get("ok"):
-        return {**common, "status": "rotation_failed", "rotation": rotation, "issues": ["rotation_failed"]}
+    timeout = readiness_timeout_sec
+    if timeout is None:
+        timeout = float(candidate.start.startup_timeout_sec) if candidate.start is not None else 120.0
+    try:
+        with lifecycle_lock("promote", current, candidate):
+            locked_current_preflight = preflight(current)
+            locked_candidate_preflight = preflight(candidate)
+            locked_candidate_issues, locked_tolerated = _candidate_preflight_blocking_issues(
+                current, candidate, locked_candidate_preflight
+            )
+            locked_issues: list[str] = []
+            if not locked_current_preflight.get("ok"):
+                locked_issues.append("current_preflight_failed")
+            locked_issues.extend(locked_candidate_issues)
+            if locked_issues:
+                return {
+                    **common,
+                    "status": "blocked_after_lock",
+                    "current_preflight": locked_current_preflight,
+                    "candidate_preflight": locked_candidate_preflight,
+                    "tolerated_candidate_preflight": locked_tolerated,
+                    "issues": locked_issues,
+                }
 
-    post_health_manifest = _post_health_manifest(current, candidate)
-    post_health = health(
-        post_health_manifest,
-        max_swap_gib=max_swap_gib,
-        max_swap_delta_gib=max_swap_delta_gib,
-        sample_sec=sample_sec,
-        include_smoke=include_smoke,
-        max_latency_sec=max_latency_sec,
-    )
-    if post_health.get("ok"):
-        return {**common, "ok": True, "status": "promoted", "rotation": rotation, "post_health": post_health}
+            rotation = _rotate_locked(
+                current,
+                candidate,
+                readiness_timeout_sec=timeout,
+                stop_timeout_sec=stop_timeout_sec,
+                rollback=rollback,
+            )
+            if not rotation.get("ok"):
+                return {**common, "status": "rotation_failed", "rotation": rotation, "issues": ["rotation_failed"]}
 
-    rollback_result = {"attempted": False}
-    if rollback:
-        rollback_result = _rollback_current(current, stop_timeout_sec=stop_timeout_sec, readiness_timeout_sec=readiness_timeout_sec)
-    return {
-        **common,
-        "status": "post_health_failed",
-        "rotation": rotation,
-        "post_health": post_health,
-        "rollback": rollback_result,
-        "issues": ["post_health_failed"],
-    }
+            post_health_manifest = _post_health_manifest(current, candidate)
+            try:
+                post_health = health(
+                    post_health_manifest,
+                    max_swap_gib=max_swap_gib,
+                    max_swap_delta_gib=max_swap_delta_gib,
+                    sample_sec=sample_sec,
+                    include_smoke=include_smoke,
+                    max_latency_sec=max_latency_sec,
+                )
+            except Exception as exc:
+                post_health = {"ok": False, "status": "health_exception", "error": f"{type(exc).__name__}: {exc}"}
+            if post_health.get("ok"):
+                return {**common, "ok": True, "status": "promoted", "rotation": rotation, "post_health": post_health}
+
+            rollback_result = {"attempted": False}
+            if rollback:
+                rollback_result = _rollback_promoted_locked(
+                    current,
+                    stop_timeout_sec=stop_timeout_sec,
+                    readiness_timeout_sec=readiness_timeout_sec,
+                )
+            return {
+                **common,
+                "status": "post_health_failed",
+                "rotation": rotation,
+                "post_health": post_health,
+                "rollback": rollback_result,
+                "issues": ["post_health_failed"],
+            }
+    except LifecycleLockError as exc:
+        return {**common, "status": "lock_failed", "lock": exc.failure.as_dict(), "issues": ["lock_failed"]}
+    except Exception as exc:
+        return {**common, "status": "promotion_exception", "error": f"{type(exc).__name__}: {exc}", "issues": ["promotion_exception"]}

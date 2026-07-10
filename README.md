@@ -17,7 +17,7 @@ These documents define the current authority chain and the move from guarded pro
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.3/local_modelctl-0.24.3-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.4/local_modelctl-0.24.4-py3-none-any.whl
 ```
 
 For local development:

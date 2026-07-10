@@ -59,6 +59,47 @@ def emit(obj) -> None:
         print(json.dumps(obj, indent=2, sort_keys=True))
 
 
+def _result_succeeded(result: dict, *, action: str = "generic") -> bool:
+    if not isinstance(result, dict) or not result:
+        return False
+    if "ok" in result and result.get("ok") is not True:
+        return False
+    readiness = result.get("readiness")
+    if "readiness" in result and (not isinstance(readiness, dict) or readiness.get("ready") is not True):
+        return False
+    if "ready" in result and result.get("ready") is not True:
+        return False
+
+    if action == "stop":
+        for key in ("stopped", "already_stopped", "known_pid_stopped", "safe_to_start"):
+            if key in result and type(result.get(key)) is not bool:
+                return False
+        if result.get("unexpected_active_pid") is not None:
+            return False
+        if result.get("known_pid_stopped") is False and result.get("safe_to_start") is True:
+            return False
+        if result.get("stopped") is True and result.get("already_stopped") is True:
+            return False
+        if result.get("stopped") is False and result.get("already_stopped") is not True:
+            return False
+        return result.get("safe_to_start") is True or (
+            "safe_to_start" not in result and result.get("known_pid_stopped") is True
+        )
+
+    if action == "start":
+        for key in ("started", "already_running"):
+            if key in result and type(result.get(key)) is not bool:
+                return False
+        return (result.get("started") is True) != (result.get("already_running") is True)
+
+    return result.get("ok") is True
+
+
+def emit_result(result: dict, *, gating: bool = True, action: str = "generic") -> int:
+    emit(result)
+    return 0 if not gating or _result_succeeded(result, action=action) else 2
+
+
 def parse_int_list(value: str) -> list[int]:
     try:
         items = [int(part.strip()) for part in value.split(",") if part.strip()]
@@ -388,7 +429,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             if args.registry_command == "add":
                 result = add_registry(args.source or args.manifest, name=args.name, registry_dir=args.registry, overwrite=args.overwrite); emit(result); return 0 if result.get("ok") else 2
             if args.registry_command == "show":
-                result = show_registry(args.name, extra_dirs=args.registry, include_content=args.content); emit(result); return 0 if result.get("ok") else 2
+                result = show_registry(args.name, extra_dirs=args.registry, include_content=args.content); return emit_result(result, gating="entry" not in result)
             if args.registry_command == "remove":
                 result = remove_registry(args.name, registry_dir=args.registry, missing_ok=args.missing_ok); emit(result); return 0 if result.get("ok") else 2
             if args.registry_command == "use":
@@ -410,7 +451,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             if args.fleet_command == "health":
                 result = fleet_health(registries=args.registry, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, limit=args.limit, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
             if args.fleet_command == "recover":
-                result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait, jobs=args.jobs); emit(result); return 0 if result.get("ok") else 2
+                result = fleet_recover(registries=args.registry, limit=args.limit, readiness_timeout=args.readiness_timeout, execute=args.execute, wait=args.wait, jobs=args.jobs); return emit_result(result)
             if args.fleet_command == "doctor":
                 result = fleet_doctor(registries=args.registry, limit=args.limit); emit(result); return 0 if result.get("ok") else 2
             if args.fleet_command == "intake":
@@ -440,18 +481,18 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if args.command == "preflight":
             result = preflight(manifest); emit(result); return 0 if result.get("ok") else 2
         if args.command == "start":
-            emit(start(manifest, wait=args.wait)); return 0
+            return emit_result(start(manifest, wait=args.wait), action="start")
         if args.command == "wait":
             result = wait_ready(manifest, timeout_sec=args.timeout); emit(result); return 0 if result.get("ready") else 2
         if args.command == "stop":
-            emit(stop(manifest, timeout_sec=args.timeout)); return 0
+            return emit_result(stop(manifest, timeout_sec=args.timeout), action="stop")
         if args.command == "rotate":
             target = load_manifest(args.to)
-            result = rotate(manifest, target, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
+            result = rotate(manifest, target, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, dry_run=args.dry_run); return emit_result(result)
         if args.command == "promote":
             from .promote import promote
             candidate = load_manifest(args.candidate)
-            result = promote(manifest, candidate, execute=args.execute, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec); emit(result); return 0 if result.get("ok") else 2
+            result = promote(manifest, candidate, execute=args.execute, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec); return emit_result(result)
         if args.command == "status":
             emit(status(manifest)); return 0
         if args.command == "health":
@@ -487,7 +528,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                 result = diff_service(manifest, label=args.label, restart=args.restart, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, max_prompt_latency_sec=args.max_prompt_latency_sec, max_completion_latency_sec=args.max_completion_latency_sec, health_mode=service_health_mode, interval_sec=args.interval, python=args.python, keep_alive=not args.no_keepalive, run_at_load=args.run_at_load, service_log_path=args.service_log, wait=not args.no_wait, include_content=args.content); emit(result); return 0 if result.get("ok") else 2
             result = service_action(manifest, args.service_command, label=args.label, dry_run=args.dry_run); emit(result); return 0 if result.get("ok") else 2
         if args.command == "cleanup":
-            emit(cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)); return 0
+            result = cleanup_execute(manifest, force=args.force) if args.execute else cleanup_plan(manifest)
+            return emit_result(result, gating=args.execute)
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr); return 130
     except Exception as exc:
