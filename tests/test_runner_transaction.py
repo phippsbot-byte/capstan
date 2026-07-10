@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import time
@@ -234,9 +235,26 @@ class RunnerTransactionTests(unittest.TestCase):
             with self.locks(root), patch.object(runner, "wait_ready", return_value={"ready": False, "error": "timeout"}):
                 result = runner.start(manifest, wait=True)
             self.assertEqual(result["status"], "readiness_failed")
-            self.assertTrue(result["cleanup"]["group_death_certified"], result)
+            certified = result["cleanup"]["group_death_certified"]
+            if certified:
+                self.assertFalse(result["durable_blocker"], result)
+                self.assertFalse((root / "model.pid.json").exists())
+            else:
+                self.assertTrue(result["durable_blocker"], result)
+                self.assertTrue((root / "model.pid.json").exists())
+                identity = capture_process_identity(result["pid"])
+                if identity is not None and not terminate_process_identity(identity, timeout_sec=5):
+                    try:
+                        os.killpg(identity.pgid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                reap_retained_popens()
+                (root / "model.pid.json").unlink(missing_ok=True)
+            deadline = time.monotonic() + 5
+            while capture_process_identity(result["pid"]) is not None and time.monotonic() < deadline:
+                reap_retained_popens()
+                time.sleep(0.01)
             self.assertIsNone(capture_process_identity(result["pid"]))
-            self.assertFalse((root / "model.pid.json").exists())
 
 
 if __name__ == "__main__":
