@@ -9,7 +9,7 @@ from . import LEGACY_CLI_NAME, PRODUCT_NAME, __version__
 
 PRETTY = False
 
-MANIFEST_COMMANDS = {"validate", "preflight", "start", "wait", "stop", "status", "health", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service", "rotate", "promote"}
+MANIFEST_COMMANDS = {"validate", "preflight", "receipt", "start", "wait", "stop", "status", "health", "smoke", "soak", "bench", "doctor", "watchdog", "daemon", "report", "cleanup", "service", "rotate", "promote"}
 BENCH_PRESETS = {
     "tiny": [128],
     "small": [128, 512, 1024],
@@ -317,6 +317,10 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     p_init.add_argument("--overwrite", action="store_true")
     sub.add_parser("validate", help="Parse manifest and print resolved summary")
     sub.add_parser("preflight", help="Run required path, port, disk, and swap checks")
+    p_receipt = sub.add_parser("receipt", help="Inspect or validate a hash-bound promotion receipt")
+    receipt_sub = p_receipt.add_subparsers(dest="receipt_command", required=True)
+    receipt_sub.add_parser("fingerprint", help="Print the candidate launch/artifact fingerprint expected by a receipt")
+    receipt_sub.add_parser("validate", help="Validate the configured promotion receipt without lifecycle mutation")
     p_list = sub.add_parser("list", help="List manifests in registry directories")
     p_list.add_argument("--registry", action="append", default=[], help="Extra registry directory to scan; can be repeated")
     add_registry_parser(sub)
@@ -353,6 +357,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     p_promote.add_argument("--sample-sec", type=nonnegative_float, default=None, help="Post-promotion swap sample seconds; 0 takes back-to-back samples")
     p_promote.add_argument("--smoke", action="store_true", help="Run manifest smoke during post-promotion health")
     p_promote.add_argument("--max-latency-sec", type=nonnegative_float, default=None, help="Maximum allowed post-promotion smoke latency")
+    p_promote.add_argument("--require-receipt", action="store_true", help="Block unless the candidate configures and passes a pinned promotion receipt")
     sub.add_parser("status", help="Print process/readiness status")
     p_health = sub.add_parser("health", help="Run high-signal readiness, pid, swap, and optional smoke health checks")
     p_health.add_argument("--max-swap-gib", type=float, default=None, help="Absolute swap ceiling; defaults to manifest preflight max_swap_gib")
@@ -480,6 +485,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             emit(validate(manifest)); return 0
         if args.command == "preflight":
             result = preflight(manifest); emit(result); return 0 if result.get("ok") else 2
+        if args.command == "receipt":
+            from .receipt import candidate_binding, validate_promotion_receipt
+            result = candidate_binding(manifest) if args.receipt_command == "fingerprint" else validate_promotion_receipt(manifest)
+            emit(result); return 0 if result.get("ok") else 2
         if args.command == "start":
             return emit_result(start(manifest, wait=args.wait), action="start")
         if args.command == "wait":
@@ -492,7 +501,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if args.command == "promote":
             from .promote import promote
             candidate = load_manifest(args.candidate)
-            result = promote(manifest, candidate, execute=args.execute, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec); return emit_result(result)
+            result = promote(manifest, candidate, execute=args.execute, readiness_timeout_sec=args.readiness_timeout, stop_timeout_sec=args.stop_timeout, rollback=not args.no_rollback, max_swap_gib=args.max_swap_gib, max_swap_delta_gib=args.max_swap_delta_gib, sample_sec=args.sample_sec, include_smoke=args.smoke, max_latency_sec=args.max_latency_sec, require_receipt=args.require_receipt); return emit_result(result)
         if args.command == "status":
             emit(status(manifest)); return 0
         if args.command == "health":

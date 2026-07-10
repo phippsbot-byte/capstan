@@ -85,6 +85,15 @@ class PreflightConfig:
 
 
 @dataclass(slots=True)
+class PromotionReceiptConfig:
+    path: str
+    sha256: str
+    max_age_sec: int = 86400
+    require_decision: str = "promote"
+    required_gates: list[str] = field(default_factory=lambda: ["logit", "quality"])
+
+
+@dataclass(slots=True)
 class ModelManifest:
     path: Path
     id: str
@@ -96,6 +105,8 @@ class ModelManifest:
     health: HealthConfig = field(default_factory=HealthConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
     smoke: SmokeConfig = field(default_factory=SmokeConfig)
+    promotion_requires_receipt: bool = False
+    promotion_receipt: PromotionReceiptConfig | None = None
     cleanup: list[CleanupCandidate] = field(default_factory=list)
 
     @property
@@ -363,6 +374,36 @@ def load_manifest(path: str | Path) -> ModelManifest:
         timeout_sec=_positive_int(smoke_raw.get("timeout_sec", smoke_defaults.timeout_sec), "smoke.timeout_sec"),
     )
 
+    promotion_receipt: PromotionReceiptConfig | None = None
+    promotion_requires_receipt = False
+    if "promotion" in data:
+        promotion_raw = _as_table(data, "promotion")
+        promotion_requires_receipt = _as_bool(promotion_raw.get("require_receipt", False), "promotion.require_receipt")
+        if "receipt" in promotion_raw:
+            receipt_raw = promotion_raw["receipt"]
+            if not isinstance(receipt_raw, dict):
+                raise ManifestError("[promotion.receipt] must be a TOML table")
+            if "path" not in receipt_raw or "sha256" not in receipt_raw:
+                raise ManifestError("[promotion.receipt] requires path and sha256")
+            receipt_sha256 = _as_str(receipt_raw["sha256"], "promotion.receipt.sha256", allow_empty=False).lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_sha256):
+                raise ManifestError("promotion.receipt.sha256 must be a 64-character hexadecimal SHA-256 digest")
+            required_gates = _as_str_list(receipt_raw.get("required_gates", ["logit", "quality"]), "promotion.receipt.required_gates")
+            if not required_gates or any(not gate or _has_control(gate) for gate in required_gates):
+                raise ManifestError("promotion.receipt.required_gates must contain non-empty gate names")
+            if len(set(required_gates)) != len(required_gates):
+                raise ManifestError("promotion.receipt.required_gates must not contain duplicates")
+            require_decision = _as_str(receipt_raw.get("require_decision", "promote"), "promotion.receipt.require_decision", allow_empty=False)
+            if _has_control(require_decision):
+                raise ManifestError("promotion.receipt.require_decision must not contain control characters")
+            promotion_receipt = PromotionReceiptConfig(
+                path=_expanded_nonempty_str(receipt_raw["path"], "promotion.receipt.path"),
+                sha256=receipt_sha256,
+                max_age_sec=_positive_int(receipt_raw.get("max_age_sec", 86400), "promotion.receipt.max_age_sec"),
+                require_decision=require_decision,
+                required_gates=required_gates,
+            )
+
     cleanup: list[CleanupCandidate] = []
     for idx, row in enumerate(_as_list(data.get("cleanup"), "cleanup")):
         if not isinstance(row, dict):
@@ -377,4 +418,4 @@ def load_manifest(path: str | Path) -> ModelManifest:
             )
         )
 
-    return ModelManifest(path=p, id=ident, model_id=model_id, endpoint=endpoint, description=description, start=start_cfg, preflight=preflight, health=health, fleet=fleet, smoke=smoke, cleanup=cleanup)
+    return ModelManifest(path=p, id=ident, model_id=model_id, endpoint=endpoint, description=description, start=start_cfg, preflight=preflight, health=health, fleet=fleet, smoke=smoke, promotion_requires_receipt=promotion_requires_receipt, promotion_receipt=promotion_receipt, cleanup=cleanup)
