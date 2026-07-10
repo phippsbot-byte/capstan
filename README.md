@@ -6,11 +6,18 @@ The legacy `modelctl` console script remains available during the rename. State 
 
 It is built for messy real local inference work: `llama.cpp`, MLX/oMLX, custom model forks, external SSD model warehouses, sidecars, launch scripts, and "wait, which 140GB directory is live?" cleanup passes.
 
+## Current project direction
+
+- [Current status — 2026-07-09](docs/CURRENT-STATUS-2026-07-09.md)
+- [Ready-to-go roadmap — 2026-07-09](docs/READY-TO-GO-2026-07-09.md)
+
+These documents define the current authority chain and the move from guarded process lifecycle toward evidence-backed candidate qualification, comparison, promotion, and rollback. Draft model-runtime experiments are research inputs, not released Capstan behavior.
+
 ## Install
 
 ```bash
 python3.11 -m pip install \
-  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.3/local_modelctl-0.24.3-py3-none-any.whl
+  https://github.com/phippsbot-byte/capstan/releases/download/v0.24.4/local_modelctl-0.24.4-py3-none-any.whl
 ```
 
 For local development:
