@@ -462,7 +462,7 @@ def _endpoint_owned(manifest: ModelManifest, identity: ProcessIdentity) -> dict[
     return {"owned": True, "owner_pids": sorted(proof.owner_pids), "identity": {"pid": identity.leader_pid, "pgid": identity.pgid, "birth_token": identity.birth_token}}
 
 
-def _start_locked(manifest: ModelManifest, wait: bool) -> dict[str, Any]:
+def _start_locked(manifest: ModelManifest, wait: bool, readiness_timeout_sec: float | None = None) -> dict[str, Any]:
     if manifest.start is None:
         raise RuntimeError("manifest has no [start] section")
     inspection = _inspect(manifest)
@@ -474,7 +474,7 @@ def _start_locked(manifest: ModelManifest, wait: bool) -> dict[str, Any]:
         result: dict[str, Any] = {"ok": True, "started": False, "already_running": True, "pid": identity.leader_pid, "pid_path": str(default_pid_path(manifest))}
         if wait:
             try:
-                readiness = wait_ready(manifest)
+                readiness = wait_ready(manifest, timeout_sec=readiness_timeout_sec)
                 ownership = _endpoint_owned(manifest, identity) if readiness.get("ready") else {"owned": False}
             except Exception as exc:
                 result.update({"ok": False, "status": "readiness_exception", "error": f"{type(exc).__name__}: {exc}"})
@@ -569,7 +569,7 @@ def _start_locked(manifest: ModelManifest, wait: bool) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": True, "started": True, "pid": identity.leader_pid, "pid_path": str(default_pid_path(manifest)), "log_path": str(default_log_path(manifest))}
     if wait:
         try:
-            readiness = wait_ready(manifest)
+            readiness = wait_ready(manifest, timeout_sec=readiness_timeout_sec)
             ownership = _endpoint_owned(manifest, identity) if readiness.get("ready") else {"owned": False}
         except Exception as exc:
             cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id)
@@ -638,6 +638,191 @@ def _manifest_ref(manifest: ModelManifest) -> dict[str, Any]:
     return {"id": manifest.id, "model_id": manifest.model_id, "endpoint": manifest.endpoint, "path": str(manifest.path)}
 
 
+def _rotation_plan(current: ModelManifest, target: ModelManifest, timeout: float, stop_timeout_sec: int, rollback: bool) -> dict[str, Any]:
+    return {
+        "steps": [
+            "lock_current_and_target_resources",
+            "stop_current_exactly",
+            "launch_target_with_pending_transaction",
+            "prove_readiness_and_endpoint_ownership",
+            "handoff_authenticated_state",
+            "rollback_current_on_failure" if rollback else "leave_current_stopped_on_failure",
+        ],
+        "current_pid_path": str(default_pid_path(current)),
+        "target_pid_path": str(default_pid_path(target)),
+        "readiness_timeout_sec": timeout,
+        "stop_timeout_sec": stop_timeout_sec,
+    }
+
+
+def _rotation_handoff_locked(current: ModelManifest, target: ModelManifest) -> dict[str, Any]:
+    inspection = _inspect(target)
+    if inspection.get("status") != "live" or not isinstance(inspection.get("identity"), ProcessIdentity):
+        raise PIDStateError(f"target state is not authenticated live state: {inspection.get('status')}")
+    identity: ProcessIdentity = inspection["identity"]
+    target_state = inspection.get("raw")
+    if not isinstance(target_state, dict) or _validate_active(target, target_state) != identity:
+        raise PIDStateError("target active state changed before handoff")
+
+    handoff_state = dict(target_state)
+    handoff_state.update(
+        {
+            "manifest": _manifest_path(current),
+            "fingerprint": _launch_fingerprint(current),
+            "endpoint": {
+                "host": endpoint_identity(current.endpoint).host,
+                "port": endpoint_identity(current.endpoint).port,
+            },
+            "source_manifest": _manifest_path(target),
+            "rotated_from": _manifest_ref(current),
+            "rotated_to": _manifest_ref(target),
+            "rotated_at": _timestamp(),
+            "source_pid_path": str(default_pid_path(target)),
+            "owner_pid_path": str(default_pid_path(current)),
+        }
+    )
+    current_log = default_log_path(current).expanduser()
+    if not current_log.is_absolute():
+        current_log = current.path.parent / current_log
+    handoff_state["log_path"] = str(current_log.resolve(strict=False))
+
+    current_path = _state_path(current)
+    target_path = _state_path(target)
+    if current_path == target_path:
+        _atomic_write(current_path, handoff_state, exclusive=False)
+        target_removed = False
+    else:
+        _atomic_write(current_path, handoff_state, exclusive=True)
+        target_removed, target_remove_error = _guarded_remove(target, lambda raw: _validate_active(target, raw) == identity)
+        if not target_removed:
+            raise PIDStateError(f"target state handoff cleanup failed: {target_remove_error or 'state changed'}")
+
+    if _validate_active(current, handoff_state) != identity:
+        raise PIDStateError("handed-off state does not validate for current manifest")
+    return {
+        "identity": {"pid": identity.leader_pid, "pgid": identity.pgid, "birth_token": identity.birth_token},
+        "current_pid_path": str(default_pid_path(current)),
+        "target_pid_path": str(default_pid_path(target)),
+        "target_pid_state_removed": target_removed,
+        "transactional": True,
+    }
+
+
+def _recover_rotation_locked(
+    current: ModelManifest,
+    target: ModelManifest,
+    *,
+    stop_timeout_sec: int,
+    readiness_timeout_sec: float,
+    restart_current: bool,
+) -> dict[str, Any]:
+    stop_current = _stop_locked(current, stop_timeout_sec)
+    stop_target = _stop_locked(target, stop_timeout_sec)
+    cleanup_safe = bool(stop_current.get("safe_to_start") and stop_target.get("safe_to_start"))
+    result: dict[str, Any] = {
+        "attempted": restart_current,
+        "cleanup_safe": cleanup_safe,
+        "stop_current_owner": stop_current,
+        "stop_target_owner": stop_target,
+    }
+    if not restart_current or not cleanup_safe:
+        result["ok"] = cleanup_safe and not restart_current
+        return result
+    restarted = _start_locked(current, True, readiness_timeout_sec)
+    result.update({"start": restarted, "readiness": restarted.get("readiness"), "ok": restarted.get("ok") is True})
+    return result
+
+
+def _rotate_locked(
+    current: ModelManifest,
+    target: ModelManifest,
+    *,
+    readiness_timeout_sec: float,
+    stop_timeout_sec: int,
+    rollback: bool,
+) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "ok": False,
+        "action": "rotate",
+        "from": _manifest_ref(current),
+        "to": _manifest_ref(target),
+        "readiness_timeout_sec": readiness_timeout_sec,
+        "stop_timeout_sec": stop_timeout_sec,
+        "rollback_enabled": rollback,
+        "dry_run": False,
+    }
+    current_inspection = _inspect(current)
+    old_identity = current_inspection.get("identity")
+    old_pid = old_identity.leader_pid if current_inspection.get("status") == "live" and isinstance(old_identity, ProcessIdentity) else None
+
+    stop_current = _stop_locked(current, stop_timeout_sec)
+    if stop_current.get("ok") is not True or stop_current.get("safe_to_start") is not True:
+        return {
+            **base,
+            "status": "current_stop_failed",
+            "old_pid": old_pid,
+            "stop_current": stop_current,
+            "issues": ["current_stop_failed"],
+        }
+
+    try:
+        target_start = _start_locked(target, True, readiness_timeout_sec)
+    except Exception as exc:
+        target_start = {"ok": False, "started": False, "status": "target_start_exception", "error": f"{type(exc).__name__}: {exc}"}
+    if target_start.get("ok") is not True:
+        recovery = _recover_rotation_locked(
+            current,
+            target,
+            stop_timeout_sec=stop_timeout_sec,
+            readiness_timeout_sec=readiness_timeout_sec,
+            restart_current=rollback,
+        )
+        failure_status = "target_not_ready" if target_start.get("status") in {"readiness_failed", "endpoint_ownership_failed", "readiness_exception"} else "target_start_failed"
+        return {
+            **base,
+            "status": failure_status,
+            "old_pid": old_pid,
+            "stop_current": stop_current,
+            "target_start": target_start,
+            "rollback": recovery,
+            "issues": ["target_start_failed"],
+        }
+
+    try:
+        handoff = _rotation_handoff_locked(current, target)
+    except Exception as exc:
+        recovery = _recover_rotation_locked(
+            current,
+            target,
+            stop_timeout_sec=stop_timeout_sec,
+            readiness_timeout_sec=readiness_timeout_sec,
+            restart_current=rollback,
+        )
+        return {
+            **base,
+            "status": "handoff_failed",
+            "old_pid": old_pid,
+            "stop_current": stop_current,
+            "target_start": target_start,
+            "rollback": recovery,
+            "error": f"{type(exc).__name__}: {exc}",
+            "issues": ["handoff_failed"],
+        }
+
+    return {
+        **base,
+        "ok": True,
+        "status": "rotated",
+        "old_pid": old_pid,
+        "new_pid": target_start.get("pid"),
+        "stop_current": stop_current,
+        "target_start": target_start,
+        "readiness": target_start.get("readiness"),
+        "endpoint_ownership": target_start.get("endpoint_ownership"),
+        "handoff": handoff,
+    }
+
+
 def rotate(
     current: ModelManifest,
     target: ModelManifest,
@@ -647,7 +832,8 @@ def rotate(
     rollback: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Rotate from current manifest process to target with readiness-gated PID ownership handoff."""
+    """Rotate current to target under one complete lifecycle transaction lock."""
+
     base: dict[str, Any] = {
         "ok": False,
         "action": "rotate",
@@ -669,142 +855,21 @@ def rotate(
             "error": "target must preserve current endpoint and model_id for stable-lane rotation",
             "issues": ["target_identity_mismatch"],
         }
-    timeout = readiness_timeout_sec if readiness_timeout_sec is not None else target.start.startup_timeout_sec
+    timeout = readiness_timeout_sec if readiness_timeout_sec is not None else float(target.start.startup_timeout_sec)
     base["readiness_timeout_sec"] = timeout
-    current_pid_path = default_pid_path(current)
-    target_pid_path = default_pid_path(target)
-    plan = {
-        "steps": ["stop_current", "start_target", "verify_target_readiness", "atomically_handoff_pid_state"],
-        "current_pid_path": str(current_pid_path),
-        "target_pid_path": str(target_pid_path),
-    }
+    plan = _rotation_plan(current, target, timeout, stop_timeout_sec, rollback)
     if dry_run:
         return {**base, "ok": True, "status": "planned", "plan": plan}
-
-    old_pid = active_pid(current)
-    stop_current = stop(current, timeout_sec=stop_timeout_sec)
-    if stop_current.get("owner_mismatch") or (old_pid is not None and not stop_current.get("stopped")):
-        return {
-            **base,
-            "status": "current_stop_failed",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "issues": ["current_stop_failed"],
-        }
-
-    def rollback_current() -> dict[str, Any]:
-        if not rollback:
-            return {"attempted": False}
-        try:
-            rollback_start = start(current, wait=False)
-            rollback_timeout = current.start.startup_timeout_sec if current.start else timeout
-            rollback_readiness = wait_ready(current, timeout_sec=rollback_timeout)
-            return {"attempted": True, "start": rollback_start, "readiness": rollback_readiness}
-        except Exception as exc:
-            return {"attempted": True, "error": f"{type(exc).__name__}: {exc}"}
-
     try:
-        target_start = start(target, wait=False)
+        with lifecycle_lock("rotate", current, target):
+            return _rotate_locked(
+                current,
+                target,
+                readiness_timeout_sec=timeout,
+                stop_timeout_sec=stop_timeout_sec,
+                rollback=rollback,
+            )
+    except LifecycleLockError as exc:
+        return {**base, "status": "lock_failed", "lock": exc.failure.as_dict(), "issues": ["lock_failed"]}
     except Exception as exc:
-        rollback_result = rollback_current()
-        return {
-            **base,
-            "status": "target_start_failed",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "error": f"{type(exc).__name__}: {exc}",
-            "rollback": rollback_result,
-            "issues": ["target_start_failed"],
-        }
-    readiness = wait_ready(target, timeout_sec=timeout)
-    if not readiness.get("ready"):
-        target_stop = stop(target, timeout_sec=stop_timeout_sec)
-        rollback_result = rollback_current()
-        return {
-            **base,
-            "status": "target_not_ready",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "target_start": target_start,
-            "readiness": readiness,
-            "target_stop": target_stop,
-            "rollback": rollback_result,
-            "issues": ["target_not_ready"],
-        }
-
-    target_state = read_pid_state(target)
-    expected_pid = target_start.get("pid") if isinstance(target_start, dict) else None
-    target_state_valid = bool(target_state) and isinstance(target_state.get("pid") if target_state else None, int)
-    if target_state_valid and isinstance(expected_pid, int) and target_state and target_state.get("pid") != expected_pid:
-        target_state_valid = False
-    if target_state_valid and target_state and target_state.get("manifest") != str(target.path):
-        target_state_valid = False
-    if not target_state_valid or target_state is None:
-        target_stop = stop(target, timeout_sec=stop_timeout_sec)
-        rollback_result = rollback_current()
-        return {
-            **base,
-            "status": "target_pid_state_missing",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "target_start": target_start,
-            "readiness": readiness,
-            "target_stop": target_stop,
-            "rollback": rollback_result,
-            "issues": ["target_pid_state_missing"],
-        }
-
-    handoff_state = dict(target_state)
-    handoff_state["manifest"] = _manifest_path(current)
-    if handoff_state.get("schema_version") == 2 and handoff_state.get("kind") == "active":
-        handoff_state["fingerprint"] = _launch_fingerprint(current)
-        current_log = default_log_path(current).expanduser()
-        if not current_log.is_absolute():
-            current_log = current.path.parent / current_log
-        handoff_state["log_path"] = str(current_log.resolve(strict=False))
-    handoff_state["source_manifest"] = str(target.path)
-    handoff_state["rotated_from"] = _manifest_ref(current)
-    handoff_state["rotated_to"] = _manifest_ref(target)
-    handoff_state["rotated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    handoff_state["source_pid_path"] = str(target_pid_path)
-    handoff_state["owner_pid_path"] = str(current_pid_path)
-    try:
-        if target_pid_path == current_pid_path:
-            write_pid_state(current, handoff_state)
-            removed = False
-        else:
-            _atomic_write(_state_path(current), handoff_state, exclusive=False)
-            _state_path(target).unlink()
-            removed = True
-    except Exception as exc:
-        target_stop = stop(target, timeout_sec=stop_timeout_sec)
-        rollback_result = rollback_current()
-        return {
-            **base,
-            "status": "handoff_failed",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "target_start": target_start,
-            "readiness": readiness,
-            "target_stop": target_stop,
-            "rollback": rollback_result,
-            "error": f"{type(exc).__name__}: {exc}",
-            "issues": ["handoff_failed"],
-        }
-
-    return {
-        **base,
-        "ok": True,
-        "status": "rotated",
-        "old_pid": old_pid,
-        "new_pid": handoff_state.get("pid"),
-        "stop_current": stop_current,
-        "target_start": target_start,
-        "readiness": readiness,
-        "handoff": {
-            "current_pid_path": str(current_pid_path),
-            "target_pid_path": str(target_pid_path),
-            "target_pid_state_removed": removed,
-            "atomic": True,
-        },
-    }
+        return {**base, "status": "rotate_exception", "error": f"{type(exc).__name__}: {exc}", "issues": ["rotate_exception"]}
