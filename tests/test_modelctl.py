@@ -102,6 +102,9 @@ class ModelCtlTests(unittest.TestCase):
                 write_registry_manifest(registry, f"m{idx}", f"http://127.0.0.1:{9000 + idx}/v1")
 
             calls: list[tuple[str, float]] = []
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
             original_readiness = fleet_mod.readiness_check
             original_active_pid = fleet_mod.active_pid
             original_pid_state = fleet_mod.read_pid_state
@@ -111,8 +114,14 @@ class ModelCtlTests(unittest.TestCase):
             original_registry_env = os.environ.get("MODELCTL_REGISTRY")
 
             def slow_readiness(manifest, timeout=10):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
                 time.sleep(0.2)
-                calls.append((manifest.id, timeout))
+                with lock:
+                    active -= 1
+                    calls.append((manifest.id, timeout))
                 return {"ready": False, "status": 599, "url": manifest.models_url}
 
             try:
@@ -123,9 +132,7 @@ class ModelCtlTests(unittest.TestCase):
                 fleet_mod.swap_used_gib = lambda: 0.0
                 os.environ["XDG_CONFIG_HOME"] = str(root / "xdg-config")
                 os.environ.pop("MODELCTL_REGISTRY", None)
-                started = time.perf_counter()
                 result = fleet_mod.fleet_status(registries=[str(registry)], readiness_timeout=0.25)
-                elapsed = time.perf_counter() - started
             finally:
                 fleet_mod.readiness_check = original_readiness
                 fleet_mod.active_pid = original_active_pid
@@ -143,7 +150,7 @@ class ModelCtlTests(unittest.TestCase):
 
             self.assertTrue(result["ok"], result)
             self.assertEqual([row["id"] for row in result["models"]], ["m0", "m1", "m2", "m3"])
-            self.assertLess(elapsed, 0.45, f"fleet status should not scan readiness serially; elapsed={elapsed:.3f}s")
+            self.assertGreaterEqual(max_active, 2, f"fleet status should overlap readiness checks; max_active={max_active}")
             self.assertEqual(sorted(calls), [("m0", 0.25), ("m1", 0.25), ("m2", 0.25), ("m3", 0.25)])
 
     def test_fleet_health_checks_entries_concurrently_with_jobs_and_timing(self):
