@@ -1,0 +1,66 @@
+{
+  "schema": "hy3-cpp-q4-direct-dot-spike-v1",
+  "kernel": "direct_q4_group_affine_neon",
+  "fixtures": [
+    {
+      "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/hy3-layer1-top5-seq4.json",
+      "layer": 1, "seq_len": 4, "topk": 5,
+      "routes": 20, "unique_experts": 17,
+      "dense": {"load_s": 0.0636281, "dequant_s": 0.275683, "compute_s": 0.0319473, "total_excluding_load_s": 0.30763, "max_rel_to_expected": 0.00149517},
+      "direct": {"load_s": 0.0186764, "compute_s": 0.0690862, "total_excluding_load_s": 0.0690862, "max_rel_to_expected": 0.0014952},
+      "direct_vs_dense": {"max_rel_to_dense": 1.63439e-07, "mean_abs": 2.53349e-09},
+      "direct_speedup_vs_dense_total": 4.45285,
+      "direct_speedup_vs_dense_compute_only": 0.462427
+    },
+    {
+      "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/hy3-layer40-top5-seq4.json",
+      "layer": 40, "seq_len": 4, "topk": 5,
+      "routes": 20, "unique_experts": 16,
+      "dense": {"load_s": 0.0592546, "dequant_s": 0.150228, "compute_s": 0.018683, "total_excluding_load_s": 0.168911, "max_rel_to_expected": 0.00861913},
+      "direct": {"load_s": 0.0247495, "compute_s": 0.0682179, "total_excluding_load_s": 0.0682179, "max_rel_to_expected": 0.00861937},
+      "direct_vs_dense": {"max_rel_to_dense": 4.19994e-07, "mean_abs": 2.68604e-08},
+      "direct_speedup_vs_dense_total": 2.47604,
+      "direct_speedup_vs_dense_compute_only": 0.273872
+    },
+    {
+      "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-140203-prefill4-all-layers/hy3-layer79-top5-seq4.json",
+      "layer": 79, "seq_len": 4, "topk": 5,
+      "routes": 20, "unique_experts": 19,
+      "dense": {"load_s": 0.100316, "dequant_s": 0.205773, "compute_s": 0.0264393, "total_excluding_load_s": 0.232212, "max_rel_to_expected": 0.00289692},
+      "direct": {"load_s": 0.0427638, "compute_s": 0.0670522, "total_excluding_load_s": 0.0670522, "max_rel_to_expected": 0.00289684},
+      "direct_vs_dense": {"max_rel_to_dense": 1.67117e-07, "mean_abs": 1.5085e-05},
+      "direct_speedup_vs_dense_total": 3.46315,
+      "direct_speedup_vs_dense_compute_only": 0.394309
+    },
+    {
+      "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-152258-prefill16-all-layers/hy3-layer1-top5-seq16.json",
+      "layer": 1, "seq_len": 16, "topk": 5,
+      "routes": 80, "unique_experts": 38,
+      "dense": {"load_s": 0.0961255, "dequant_s": 0.615997, "compute_s": 0.126862, "total_excluding_load_s": 0.742859, "max_rel_to_expected": 0.0051209},
+      "direct": {"load_s": 0.0550015, "compute_s": 0.273531, "total_excluding_load_s": 0.273531, "max_rel_to_expected": 0.00512073},
+      "direct_vs_dense": {"max_rel_to_dense": 1.65011e-07, "mean_abs": 2.84449e-09},
+      "direct_speedup_vs_dense_total": 2.71581,
+      "direct_speedup_vs_dense_compute_only": 0.463793
+    },
+    {
+      "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-152258-prefill16-all-layers/hy3-layer40-top5-seq16.json",
+      "layer": 40, "seq_len": 16, "topk": 5,
+      "routes": 80, "unique_experts": 36,
+      "dense": {"load_s": 0.101845, "dequant_s": 0.52739, "compute_s": 0.0951785, "total_excluding_load_s": 0.622568, "max_rel_to_expected": 0.0111019},
+      "direct": {"load_s": 0.0551789, "compute_s": 0.274246, "total_excluding_load_s": 0.274246, "max_rel_to_expected": 0.0111018},
+      "direct_vs_dense": {"max_rel_to_dense": 4.90618e-07, "mean_abs": 3.23945e-08},
+      "direct_speedup_vs_dense_total": 2.27011,
+      "direct_speedup_vs_dense_compute_only": 0.347055
+    },
+    {
+      "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-152258-prefill16-all-layers/hy3-layer79-top5-seq16.json",
+      "layer": 79, "seq_len": 16, "topk": 5,
+      "routes": 80, "unique_experts": 40,
+      "dense": {"load_s": 0.140903, "dequant_s": 0.58038, "compute_s": 0.115115, "total_excluding_load_s": 0.695496, "max_rel_to_expected": 0.00322378},
+      "direct": {"load_s": 0.0904711, "compute_s": 0.275282, "total_excluding_load_s": 0.275282, "max_rel_to_expected": 0.00322369},
+      "direct_vs_dense": {"max_rel_to_dense": 3.37203e-07, "mean_abs": 4.31025e-06},
+      "direct_speedup_vs_dense_total": 2.52649,
+      "direct_speedup_vs_dense_compute_only": 0.418173
+    }
+  ]
+}

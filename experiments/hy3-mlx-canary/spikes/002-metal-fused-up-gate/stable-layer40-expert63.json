@@ -1,0 +1,98 @@
+{
+  "all_metal_full_expert_s": {
+    "max": 0.028064,
+    "mean": 0.004355,
+    "median": 0.00099,
+    "min": 0.000387
+  },
+  "all_metal_full_expert_speedup_vs_gather_median": 1.0859,
+  "expert": 63,
+  "full_expert_speedup_vs_gather_median": 1.1328,
+  "fused_metal_swiglu_s": {
+    "max": 0.02416,
+    "mean": 0.003922,
+    "median": 0.000903,
+    "min": 0.000288
+  },
+  "fused_speedup_vs_gather_median": 1.1063,
+  "fused_speedup_vs_separate_metal_median": 1.1019,
+  "fused_up_gate_plus_gather_down_full_expert_s": {
+    "max": 0.141196,
+    "mean": 0.004951,
+    "median": 0.000949,
+    "min": 0.000346
+  },
+  "gather_qmm_full_expert_s": {
+    "max": 0.025752,
+    "mean": 0.004104,
+    "median": 0.001075,
+    "min": 0.000383
+  },
+  "gather_qmm_swiglu_s": {
+    "max": 0.030684,
+    "mean": 0.00416,
+    "median": 0.000999,
+    "min": 0.000336
+  },
+  "layer": 40,
+  "max_abs_diff_all_metal_full_vs_gather_full": 0.16657638549804688,
+  "max_abs_diff_fused_full_vs_gather_full": 0.125,
+  "max_abs_diff_fused_vs_gather_swiglu": 0.3106565475463867,
+  "max_abs_diff_separate_metal_vs_gather_swiglu": 0.3106565475463867,
+  "mean_abs_diff_all_metal_full_vs_gather_full": 0.024390604346990585,
+  "mean_abs_diff_fused_full_vs_gather_full": 0.023228095844388008,
+  "mean_abs_diff_fused_vs_gather_swiglu": 0.012440760619938374,
+  "mean_abs_diff_separate_metal_vs_gather_swiglu": 0.012440760619938374,
+  "ok": true,
+  "schema": "hy3-metal-fused-up-gate-probe-v1",
+  "separate_metal_swiglu_s": {
+    "max": 0.032272,
+    "mean": 0.004638,
+    "median": 0.000995,
+    "min": 0.000364
+  },
+  "shape": {
+    "down": {
+      "groups": 24,
+      "in_dim": 1536,
+      "out_dim": 4096,
+      "packed_words": 192
+    },
+    "threads": 256,
+    "up_gate": {
+      "groups": 64,
+      "in_dim": 4096,
+      "out_dim": 1536,
+      "packed_words": 512
+    }
+  },
+  "sidecar_store": {
+    "cached_experts": 1,
+    "evictions": 0,
+    "gc_calls": 0,
+    "gc_time_s": 0.0,
+    "get_calls": 1,
+    "hits": 0,
+    "layers_with_cache": 1,
+    "layout_path": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json",
+    "load_time_s": 0.004,
+    "loads": 1,
+    "pack_time_s": 0.0,
+    "packed_batch_loads": 1,
+    "packed_coalesce_max_gib": 0.032,
+    "packed_coalesce_max_overread_ratio": 2.0,
+    "packed_coalesced_extra_gib": 0.0,
+    "packed_multi_expert_experts": 0,
+    "packed_multi_expert_groups": 0,
+    "packed_read_experts": 1,
+    "packed_read_groups": 1,
+    "qmm_time_s": 0.0,
+    "read_calls": 1,
+    "read_gib": 0.009888,
+    "remap_time_s": 0.0,
+    "requested_unique_max": 1,
+    "requested_unique_total": 1,
+    "schema": "hy3-packed-sidecar-v1",
+    "slot_bank": 8
+  }
+}

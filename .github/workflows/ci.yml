@@ -14,5 +14,8 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install -e .
       - run: python -m unittest discover -s tests -v
+      - run: cmake -S experiments/hy3-mlx-canary/cpp -B build/hy3-cpp -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build/hy3-cpp --parallel 3
+      - run: ctest --test-dir build/hy3-cpp --output-on-failure
       - run: python -m pip install --upgrade build
       - run: python -m build

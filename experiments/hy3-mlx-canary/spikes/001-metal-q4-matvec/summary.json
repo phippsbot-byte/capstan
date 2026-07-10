@@ -1,0 +1,39 @@
+{
+  "recommendation": "Do not replace MLX gather_qmm with this simple custom kernel. The row-reduce Metal q4 matvec compiles and is numerically close, but performance is roughly parity/noisy, not a decisive win. A real win likely needs a fused routed-MLP kernel or staying on MLX gather_qmm.",
+  "results": {
+    "down-row-reduce.json": {
+      "family": "down_proj",
+      "gather_median_s": 0.000347,
+      "kernel": "row-reduce",
+      "max_abs_diff_vs_gather_qmm": 0.027056217193603516,
+      "metal_median_s": 0.000361,
+      "speedup_vs_gather_median": 0.9612
+    },
+    "gate-row-reduce.json": {
+      "family": "gate_proj",
+      "gather_median_s": 0.004739,
+      "kernel": "row-reduce",
+      "max_abs_diff_vs_gather_qmm": 0.05067586898803711,
+      "metal_median_s": 0.004046,
+      "speedup_vs_gather_median": 1.1713
+    },
+    "up-naive.json": {
+      "family": "up_proj",
+      "gather_median_s": 0.006791,
+      "kernel": "naive",
+      "max_abs_diff_vs_gather_qmm": 0.05494558811187744,
+      "metal_median_s": 0.008544,
+      "speedup_vs_gather_median": 0.7948
+    },
+    "up-row-reduce.json": {
+      "family": "up_proj",
+      "gather_median_s": 0.000322,
+      "kernel": "row-reduce",
+      "max_abs_diff_vs_gather_qmm": 0.05495274066925049,
+      "metal_median_s": 0.000329,
+      "speedup_vs_gather_median": 0.9787
+    }
+  },
+  "schema": "hy3-metal-q4-matvec-spike-summary-v1",
+  "verdict": "PARTIAL"
+}

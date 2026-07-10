@@ -1,0 +1,104 @@
+{
+  "diff_metal_hidden_vs_gather_hidden": {
+    "max_abs": 0.012257158756256104,
+    "mean_abs": 0.0001745801419019699,
+    "rmse": 0.00029328875825740397
+  },
+  "diff_metal_preweighted_vs_fixture_expected": {
+    "max_abs": 0.0052490234375,
+    "mean_abs": 0.0007984027615748346,
+    "rmse": 0.0010423631174489856
+  },
+  "diff_metal_preweighted_vs_gather_preweighted": {
+    "max_abs": 0.00518798828125,
+    "mean_abs": 0.0007601616671308875,
+    "rmse": 0.0009975825669243932
+  },
+  "diff_preweighted_gather_vs_standard": {
+    "max_abs": 0.00407668761909008,
+    "mean_abs": 0.0006078487494960427,
+    "rmse": 0.0007893933798186481
+  },
+  "diff_standard_vs_fixture_expected": {
+    "max_abs": 0.0032590925693511963,
+    "mean_abs": 0.0004957554629072547,
+    "rmse": 0.0006508814403787255
+  },
+  "fixture": "/Volumes/ModelSSD/logs/hy3-mlx-canary/parity-fixtures/20260707-152258-prefill16-all-layers/hy3-layer40-top5-seq16.json",
+  "gather_preweighted_full_s": {
+    "max": 0.001461,
+    "mean": 0.001137,
+    "median": 0.001129,
+    "min": 0.001091
+  },
+  "gather_standard_full_s": {
+    "max": 0.001284,
+    "mean": 0.001125,
+    "median": 0.001123,
+    "min": 0.001098
+  },
+  "gather_weighted_hidden_s": {
+    "max": 0.001009,
+    "mean": 0.00089,
+    "median": 0.000905,
+    "min": 0.000781
+  },
+  "layer": 40,
+  "metal_hidden_speedup_vs_gather_median": 0.3877,
+  "metal_preweighted_full_s": {
+    "max": 0.002799,
+    "mean": 0.00261,
+    "median": 0.002602,
+    "min": 0.002582
+  },
+  "metal_preweighted_full_speedup_vs_gather_preweighted_median": 0.4339,
+  "metal_preweighted_full_speedup_vs_standard_median": 0.4316,
+  "metal_weighted_hidden_s": {
+    "max": 0.002431,
+    "mean": 0.002333,
+    "median": 0.002334,
+    "min": 0.002279
+  },
+  "ok": true,
+  "preweighted_gather_speedup_vs_standard_median": 0.9947,
+  "route_count": 80,
+  "schema": "hy3-metal-route-batched-up-gate-probe-v1",
+  "seq_len": 16,
+  "shape": {
+    "down_out_dim": 4096,
+    "hidden_dim": 4096,
+    "threads": 256,
+    "up_gate_out_dim": 1536
+  },
+  "sidecar_store": {
+    "cached_experts": 36,
+    "evictions": 0,
+    "gc_calls": 0,
+    "gc_time_s": 0.0,
+    "get_calls": 1,
+    "hits": 0,
+    "layers_with_cache": 1,
+    "layout_path": "/Volumes/ModelSSD/Models/Hy3-preview-4bit-MLX-sidecar/manifest.json",
+    "load_time_s": 0.112,
+    "loads": 36,
+    "pack_time_s": 0.024,
+    "packed_batch_loads": 1,
+    "packed_coalesce_max_gib": 0.032,
+    "packed_coalesce_max_overread_ratio": 2.0,
+    "packed_coalesced_extra_gib": 0.019775,
+    "packed_multi_expert_experts": 17,
+    "packed_multi_expert_groups": 8,
+    "packed_read_experts": 36,
+    "packed_read_groups": 27,
+    "qmm_time_s": 0.0,
+    "read_calls": 27,
+    "read_gib": 0.375732,
+    "remap_time_s": 0.0,
+    "requested_unique_max": 36,
+    "requested_unique_total": 36,
+    "schema": "hy3-packed-sidecar-v1",
+    "slot_bank": 36
+  },
+  "topk": 5,
+  "unique_experts": 36
+}
