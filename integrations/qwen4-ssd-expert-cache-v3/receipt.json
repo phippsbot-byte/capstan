@@ -1,5 +1,5 @@
 {
-  "status": "EXPERIMENTAL_OFFLINE_AND_ZERO_MODEL_VERIFIED",
+  "status": "EXPERIMENTAL_SHORT_REPOSITORY_CANARY_VERIFIED",
   "runtime_base_commit": "8d3d35d2423a98a376b47ce7bd27e6f6e1fa76cf",
   "patch_sha256": "487e273095703bc84b7c06f670c721ff79f22f9aaf419c2d61e0cbf552eee25d",
   "selected_files": {
@@ -23,5 +23,89 @@
   "zero_model_lifecycle": "PASS",
   "real_repository_canaries": "INCOMPLETE_FIRST_ATTEMPT_HARNESS_ERROR",
   "model_promotion": false,
-  "production_deployment_approved": false
+  "production_deployment_approved": false,
+  "real_repo_canary_status": "PASS_THREE_BUDGETS_SHORT_PROMPTS_THINKING_OFF",
+  "live_canary": {
+    "scope": {
+      "unique_scratch_repository_tasks": 2,
+      "cache_budgets_tested": 3,
+      "completed_repository_runs": 6,
+      "tool_loop_requests": 24,
+      "native_qualification_smokes": 21,
+      "context_limit_tokens": 8192,
+      "maximum_observed_task_prompt_tokens": 823,
+      "completion_limit_tokens": 1024,
+      "thinking": "off for repository tasks",
+      "benchmark_scores": null
+    },
+    "measurements": [
+      {
+        "lane": "off",
+        "cache_budget_bytes": 0,
+        "cases": 2,
+        "requests": 8,
+        "native_smokes": 7,
+        "case_wall_total_seconds": 101.36746633402072,
+        "case_wall_change_vs_off_pct": 0.0,
+        "mean_server_decode_tokens_per_second": 18.8525,
+        "request_median_seconds": 12.357156208512606,
+        "request_max_seconds": 17.12509558396414,
+        "peak_candidate_rss_gib": 49.52360534667969,
+        "min_system_available_gib": 12.920883178710938,
+        "swap_delta_bytes": 0,
+        "cache_hit_fraction": null,
+        "evictions": 0,
+        "peak_cache_resident_bytes": 0
+      },
+      {
+        "lane": "on",
+        "cache_budget_bytes": 1073741824,
+        "cases": 2,
+        "requests": 8,
+        "native_smokes": 7,
+        "case_wall_total_seconds": 61.95211249997374,
+        "case_wall_change_vs_off_pct": -38.88363324004528,
+        "mean_server_decode_tokens_per_second": 21.895,
+        "request_median_seconds": 7.272704333532602,
+        "request_max_seconds": 11.933113583014347,
+        "peak_candidate_rss_gib": 49.385009765625,
+        "min_system_available_gib": 12.702743530273438,
+        "swap_delta_bytes": 0,
+        "cache_hit_fraction": 0.9166138336425044,
+        "evictions": 42355,
+        "peak_cache_resident_bytes": 1073664000
+      },
+      {
+        "lane": "small",
+        "cache_budget_bytes": 268435456,
+        "cases": 2,
+        "requests": 8,
+        "native_smokes": 7,
+        "case_wall_total_seconds": 156.60721333301626,
+        "case_wall_change_vs_off_pct": 54.494552341845505,
+        "mean_server_decode_tokens_per_second": 20.08875,
+        "request_median_seconds": 19.569467541499762,
+        "request_max_seconds": 23.78163504099939,
+        "peak_candidate_rss_gib": 48.31294250488281,
+        "min_system_available_gib": 13.307586669921875,
+        "swap_delta_bytes": 0,
+        "cache_hit_fraction": 0.5033206534075344,
+        "evictions": 253755,
+        "peak_cache_resident_bytes": 268185600
+      }
+    ],
+    "identical_edited_files": true,
+    "identical_expert_route_chunks_per_lane": 5292,
+    "route_sequence_sha256": "85a1232674cd6120e9f8cb5d2b80aa5af8ffcbe82d75e5574be4343cc4804abc",
+    "candidate_cleanup_and_original_auxiliary_restoration_verified": true,
+    "recommended_experimental_budget_bytes": 1073741824,
+    "small_budget_recommendation": "Do not use 256 MiB for this workload: correct but slower end to end than cache-off.",
+    "not_qualified": [
+      "16K+ / realistic long-context agent execution",
+      "consumer-memory hardware or a smaller total-RAM ceiling",
+      "cold-SSD throughput",
+      "native-thinking agent quality or model promotion",
+      "a global cache default"
+    ]
+  }
 }
