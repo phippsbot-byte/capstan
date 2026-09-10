@@ -1,0 +1,1022 @@
+diff --git a/docs/capstan-qwen4-ssd-expert-cache-v3.sha256 b/docs/capstan-qwen4-ssd-expert-cache-v3.sha256
+new file mode 100644
+index 0000000..3d380ed
+--- /dev/null
++++ b/docs/capstan-qwen4-ssd-expert-cache-v3.sha256
+@@ -0,0 +1,8 @@
++dc99aecc745b2e95fd7820a6d8642a5e815b058b467a273034449eb878d1efc1  omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/expert_residency_cache.py
++0c9fe734f0682e177d6edcb4138085e3a7d113efcef6275b7d6726043efd60a9  omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/ssd_experts.py
++d67025be031c80c6a96052814c88814e896dbf993c9d3a459706de57e9eae201  omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/paging_profile.py
++41e25efd6a445f19a8a93cad41dcbfec0fce83699684f92f4b2766119ee8a140  tests/test_qwen4_paging_profile.py
++9ad709e110ae5ed402b9ce4ac8fc521e338494779e48cfeb70cc09adbd2e358b  tests/test_soak_profile_capacity.py
++1110fa30d75d2f2f90226ed12b16fd998e5ccb5c65d765792f570d682ab06360  tests/test_ssd_expert_cache_concurrency.py
++763ae7722a2dd42064534646b0b76f94b6c082a8453da1c168785dc2ecea122d  tests/test_ssd_expert_cache_retirement.py
++79ad1c5a18fad800f66d18b698f92e2b412098373cac8dc077bc7e8c5ebf5298  tests/test_ssd_expert_residency_cache.py
+diff --git a/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/expert_residency_cache.py b/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/expert_residency_cache.py
+new file mode 100644
+index 0000000..d961a0f
+--- /dev/null
++++ b/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/expert_residency_cache.py
+@@ -0,0 +1,193 @@
++"""Process-shared, opt-in LRU residency for exact SSD expert row groups.
++
++This module deliberately has no MLX dependency: values are opaque references.
++The configured budget counts resident cached values only; request assembly is
++outside that accounting.
++"""
++
++from __future__ import annotations
++
++from collections import OrderedDict
++from dataclasses import dataclass
++from functools import wraps
++import itertools
++import os
++from threading import RLock
++from typing import Callable, TypeVar
++
++
++CACHE_BUDGET_ENV = "OMLX_QWEN4_SSD_EXPERT_CACHE_BYTES"
++
++_Value = TypeVar("_Value")
++
++
++def _synchronized(method):
++    @wraps(method)
++    def guarded(self, *args, **kwargs):
++        with self._lock:
++            return method(self, *args, **kwargs)
++    return guarded
++
++
++def parse_cache_budget(value: str | None) -> int:
++    """Parse an explicit non-negative integer byte budget; unset and empty are off."""
++    if value is None or value == "":
++        return 0
++    if not value.isascii() or not value.isdecimal():
++        raise ValueError(f"{CACHE_BUDGET_ENV} must be a non-negative integer byte count")
++    return int(value)
++
++
++@dataclass(frozen=True)
++class _Entry:
++    value: object
++    byte_count: int
++
++
++class ExpertResidencyCache:
++    """Strict byte-bounded LRU keyed by a fresh bank namespace and expert id."""
++
++    def __init__(self, budget_bytes: int):
++        if type(budget_bytes) is not int or budget_bytes < 0:
++            raise ValueError("SSD expert cache budget must be a non-negative integer")
++        self.budget_bytes = budget_bytes
++        self._lock = RLock()
++        self._entries: OrderedDict[tuple[int, int], _Entry] = OrderedDict()
++        self._retired_namespaces: set[int] = set()
++        self._resident_bytes = 0
++        self._hits = 0
++        self._misses = 0
++        self._evictions = 0
++        self._bypasses = 0
++
++    @_synchronized
++    def get_or_load(
++        self,
++        namespace: int,
++        expert: int,
++        byte_count: int,
++        loader: Callable[[int], _Value],
++    ) -> _Value:
++        """Return an exact group, only admitting it after its loader succeeds."""
++        if type(namespace) is not int or type(expert) is not int:
++            raise TypeError("SSD expert cache keys must be integer namespace/expert pairs")
++        if type(byte_count) is not int or byte_count <= 0:
++            raise ValueError("SSD expert cache entry size must be a positive integer")
++        if namespace in self._retired_namespaces:
++            raise RuntimeError("SSD expert cache bank namespace is retired")
++        key = (namespace, expert)
++        entry = self._entries.get(key)
++        if entry is not None:
++            if entry.byte_count != byte_count:
++                raise ValueError("SSD expert cache entry byte contract changed")
++            self._entries.move_to_end(key)
++            self._hits += 1
++            return entry.value  # type: ignore[return-value]
++
++        self._misses += 1
++        value = loader(expert)
++        if byte_count > self.budget_bytes:
++            self._bypasses += 1
++            return value
++
++        while self._resident_bytes + byte_count > self.budget_bytes:
++            _, evicted = self._entries.popitem(last=False)
++            self._resident_bytes -= evicted.byte_count
++            self._evictions += 1
++        self._entries[key] = _Entry(value, byte_count)
++        self._resident_bytes += byte_count
++        return value
++
++    def values_for(
++        self,
++        namespace: int,
++        experts: list[int],
++        byte_count: int,
++        loader: Callable[[int], _Value],
++    ) -> list[_Value]:
++        """Fetch groups in caller order, including duplicate expert ids."""
++        return [
++            self.get_or_load(namespace, expert, byte_count, loader)
++            for expert in experts
++        ]
++
++    @_synchronized
++    def discard_namespace(self, namespace: int) -> int:
++        """Evict values without retiring a still-open bank."""
++        if type(namespace) is not int:
++            raise TypeError("SSD expert cache namespace must be an integer")
++        removed = 0
++        for key in tuple(self._entries):
++            if key[0] == namespace:
++                entry = self._entries.pop(key)
++                self._resident_bytes -= entry.byte_count
++                removed += 1
++        return removed
++
++    @_synchronized
++    def close_namespace(self, namespace: int, closer: Callable[[], None]) -> None:
++        """Retire, evict and close atomically against cold loaders.
++
++        Retirement survives a failing closer. Tombstones retain only monotonic
++        integer tokens, never bank objects or tensors; they are control metadata
++        outside the resident-tensor budget and disappear with the process.
++        Already-returned values remain owned by their consumer graphs.
++        """
++        if type(namespace) is not int:
++            raise TypeError("SSD expert cache namespace must be an integer")
++        if not callable(closer):
++            raise TypeError("SSD expert cache bank closer must be callable")
++        self._retired_namespaces.add(namespace)
++        self.discard_namespace(namespace)
++        closer()
++
++    @_synchronized
++    def stats(self) -> dict[str, int]:
++        """Return conserved resident accounting and cache event counters."""
++        return {
++            "budget_bytes": self.budget_bytes,
++            "resident_bytes": self._resident_bytes,
++            "entry_count": len(self._entries),
++            "retired_namespace_count": len(self._retired_namespaces),
++            "hits": self._hits,
++            "misses": self._misses,
++            "evictions": self._evictions,
++            "bypasses": self._bypasses,
++        }
++
++
++_namespace_counter = itertools.count(1)
++_shared_cache: ExpertResidencyCache | None = None
++_shared_budget: int | None = None
++_shared_lock = RLock()
++
++
++def new_expert_bank_namespace() -> int:
++    """Create a never-reused process-local token without retaining a bank object."""
++    return next(_namespace_counter)
++
++
++def get_shared_expert_cache() -> ExpertResidencyCache | None:
++    """Return the one process cache, or ``None`` for the default-off configuration."""
++    global _shared_cache, _shared_budget
++    with _shared_lock:
++        budget = parse_cache_budget(os.environ.get(CACHE_BUDGET_ENV))
++        if _shared_cache is None:
++            if budget == 0:
++                return None
++            _shared_cache = ExpertResidencyCache(budget)
++            _shared_budget = budget
++            return _shared_cache
++        if budget != _shared_budget:
++            raise RuntimeError(
++                f"{CACHE_BUDGET_ENV} was already initialized for this process; "
++                "restart to change its budget"
++            )
++        return _shared_cache
++
++
++def _reset_shared_expert_cache_for_tests() -> None:
++    """Test-only reset; production configuration is intentionally process-stable."""
++    global _shared_cache, _shared_budget
++    _shared_cache = None
++    _shared_budget = None
+diff --git a/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/paging_profile.py b/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/paging_profile.py
+index 0b2acc4..0c2a538 100644
+--- a/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/paging_profile.py
++++ b/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/paging_profile.py
+@@ -8,7 +8,7 @@ from pathlib import Path
+ from typing import Any
+ 
+ _ENV = "OMLX_QWEN4_SSD_PROFILE_PATH"
+-MAX_FILE_BYTES = 32 * 1024 * 1024
++MAX_FILE_BYTES = 128 * 1024 * 1024
+ MAX_RECORD_BYTES = 64 * 1024
+ 
+ 
+@@ -44,7 +44,7 @@ class PagingProfileWriter:
+                 if len(payload) > MAX_RECORD_BYTES:
+                     raise ValueError("paging profile record exceeds 64 KiB")
+                 if self._size + len(payload) > MAX_FILE_BYTES:
+-                    raise OSError("paging profile file exceeds 32 MiB")
++                    raise OSError("paging profile file exceeds 128 MiB")
+                 written = self._file.write(payload)
+                 if written != len(payload):
+                     raise OSError("short paging profile write")
+diff --git a/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/ssd_experts.py b/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/ssd_experts.py
+index 51f83c7..6fdebcb 100644
+--- a/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/ssd_experts.py
++++ b/omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/ssd_experts.py
+@@ -19,6 +19,11 @@ from mlx_lm.models.switch_layers import (
+     SwitchGLU,
+ )
+ 
++from .expert_residency_cache import (
++    ExpertResidencyCache,
++    get_shared_expert_cache,
++    new_expert_bank_namespace,
++)
+ from .paging_profile import get_paging_profile_writer
+ 
+ _ENV = "OMLX_QWEN4_SSD_EXPERT_LAYERS"
+@@ -255,19 +260,79 @@ class _ExpertStore:
+         self.mode = "affine"
+         self.prefix = prefix
+         self.num_experts = num_experts
++        # This token is fresh for every checked bank and deliberately has no
++        # reference to a model/store object, avoiding id() reuse/retention.
++        self.cache_namespace = new_expert_bank_namespace()
++        self._expert_cache_keys = tuple(
++            f"{self.prefix}.{projection}.{suffix}"
++            for projection in _PROJECTIONS
++            for suffix in _SUFFIXES
++        )
++        self._expert_entry_bytes = sum(
++            self._specs[key].row_bytes for key in self._expert_cache_keys
++        )
++        # These are logical successful _ExpertStore.read_rows calls, not an
++        # operating-system or physical-SSD I/O measurement.
++        self._logical_read_calls = 0
++        self._logical_read_requested_bytes = 0
+ 
+     def read_rows(self, key: str, rows: list[int]) -> mx.array:
+         if any(row < 0 or row >= self.num_experts for row in rows):
+             raise IndexError("expert index is outside the routed expert bank")
+         spec = self._specs[key]
+-        return spec.reader.rows(spec, rows)
++        values = spec.reader.rows(spec, rows)
++        # Count only after the bounded reader returned successfully.
++        self._logical_read_calls += 1
++        self._logical_read_requested_bytes += spec.row_bytes * len(rows)
++        return values
++
++    def read_stats(self) -> dict[str, int]:
++        """Return per-bank logical successful read_rows counters."""
++        return {
++            "logical_read_calls": self._logical_read_calls,
++            "logical_read_requested_bytes": self._logical_read_requested_bytes,
++        }
++
++    def _read_expert(self, expert: int) -> tuple[mx.array, ...]:
++        """Read one exact quantized expert group in canonical projection order."""
++        return tuple(self.read_rows(key, [expert]) for key in self._expert_cache_keys)
++
++    def _cached_expert_rows(
++        self, rows: list[int], cache: ExpertResidencyCache
++    ) -> list[tuple[mx.array, ...]]:
++        return cache.values_for(
++            self.cache_namespace,
++            rows,
++            self._expert_entry_bytes,
++            self._read_expert,
++        )
+ 
+-    def projection(self, name: str, rows: list[int]) -> QuantizedSwitchLinear:
++    def projection(
++        self,
++        name: str,
++        rows: list[int],
++        cache: ExpertResidencyCache | None = None,
++    ) -> QuantizedSwitchLinear:
+         module = QuantizedSwitchLinear.__new__(QuantizedSwitchLinear)
+         nn.Module.__init__(module)
+-        for suffix in _SUFFIXES:
+-            key = f"{self.prefix}.{name}.{suffix}"
+-            setattr(module, suffix, self.read_rows(key, rows))
++        if cache is None:
++            # Default-off behavior: retain the original serial gather/copy path.
++            for suffix in _SUFFIXES:
++                key = f"{self.prefix}.{name}.{suffix}"
++                setattr(module, suffix, self.read_rows(key, rows))
++        else:
++            groups = self._cached_expert_rows(rows, cache)
++            projection_offset = _PROJECTIONS.index(name) * len(_SUFFIXES)
++            for offset, suffix in enumerate(_SUFFIXES):
++                values = [group[projection_offset + offset] for group in groups]
++                setattr(
++                    module,
++                    suffix,
++                    values[0] if len(values) == 1 else mx.concatenate(values, axis=0),
++                )
++            # Concatenation can remain lazy. Keep source tensors strongly
++            # referenced on this ephemeral module through consumer completion.
++            module._ssd_cache_staging = groups
+         module.group_size = self.group_size
+         module.bits = self.bits
+         module.mode = self.mode
+@@ -325,6 +390,10 @@ class DiskBackedSwitchGLU(nn.Module):
+         self.layer = layer
+         self.max_tokens = max_tokens
+         self.max_unique_experts = max_unique_experts
++        # None is the default and leaves every gather branch below unchanged.
++        # A positive env budget creates one shared process cache, never a cache
++        # per layer or pager instance.
++        self._expert_cache = get_shared_expert_cache()
+         self._store = _ExpertStore(
+             model_path, layer, input_dims, hidden_dims, num_experts
+         )
+@@ -368,12 +437,34 @@ class DiskBackedSwitchGLU(nn.Module):
+         self.chunks_last_call += 1
+         return requested_bytes
+ 
++    def _cache_telemetry_snapshot(
++        self, projections: tuple[str, ...]
++    ) -> dict[str, object]:
++        """Capture O(1) process-cache and this-bank logical read state."""
++        cache = self._expert_cache
++        snapshot: dict[str, object] = {
++            "cache": None if cache is None else "process_shared_resident",
++            "cache_mode": "off" if cache is None else "process_shared_resident",
++            "budget_bytes": 0 if cache is None else cache.budget_bytes,
++            "global_stats": None if cache is None else cache.stats(),
++            "bank_namespace": self._store.cache_namespace,
++            "full_expert_entry_bytes": self._store._expert_entry_bytes,
++            "projection_count": len(projections),
++            "projection_order": list(projections),
++        }
++        snapshot.update(self._store.read_stats())
++        return snapshot
++
+     def _compact_switch(self, experts: list[int]) -> SwitchGLU:
+         module = SwitchGLU.__new__(SwitchGLU)
+         nn.Module.__init__(module)
+-        module.gate_proj = self._store.projection("gate_proj", experts)
+-        module.up_proj = self._store.projection("up_proj", experts)
+-        module.down_proj = self._store.projection("down_proj", experts)
++        module.gate_proj = self._store.projection(
++            "gate_proj", experts, self._expert_cache
++        )
++        module.up_proj = self._store.projection("up_proj", experts, self._expert_cache)
++        module.down_proj = self._store.projection(
++            "down_proj", experts, self._expert_cache
++        )
+         module.activation = self.activation
+         module.eval()
+         return module
+@@ -424,6 +515,7 @@ class DiskBackedSwitchGLU(nn.Module):
+         return result.reshape(*indices.shape, self.input_dims)
+ 
+     def _profiled_switch_chunk(self, flat_x, flat_indices, start, stop, top_k):
++        cache_before = self._cache_telemetry_snapshot(_PROJECTIONS)
+         wall_epoch = time.time()
+         mono_start = time.monotonic()
+         routes, experts, local = self._host_routes(flat_indices[start:stop])
+@@ -440,6 +532,7 @@ class DiskBackedSwitchGLU(nn.Module):
+         del switch
+         mx.clear_cache()
+         mono_end = time.monotonic()
++        cache_after = self._cache_telemetry_snapshot(_PROJECTIONS)
+         route_seconds = route_end - mono_start
+         gather_seconds = gather_end - route_end
+         kernel_seconds = kernel_end - gather_end
+@@ -462,6 +555,8 @@ class DiskBackedSwitchGLU(nn.Module):
+                 "original_flattened_route_ids": routes,
+                 "unique_ids": experts,
+                 "logical_requested_bytes": requested_bytes,
++                "cache_before": cache_before,
++                "cache_after": cache_after,
+                 "wall_epoch_seconds": wall_epoch,
+                 "monotonic_start_seconds": mono_start,
+                 "monotonic_end_seconds": mono_end,
+@@ -487,7 +582,7 @@ class DiskBackedSwitchGLU(nn.Module):
+             stop = min(start + token_chunk, x.shape[0])
+             if self._paging_profile is None:
+                 _, experts, local = self._host_routes(indices[start:stop])
+-                projection = self._store.projection(name, experts)
++                projection = self._store.projection(name, experts, self._expert_cache)
+                 local_indices = mx.array(local, dtype=mx.int32).reshape(
+                     *indices[start:stop].shape
+                 )
+@@ -512,11 +607,12 @@ class DiskBackedSwitchGLU(nn.Module):
+     def _profiled_projection_chunk(
+         self, name, x, indices, start, stop, top_k, sorted_indices
+     ):
++        cache_before = self._cache_telemetry_snapshot((name,))
+         wall_epoch = time.time()
+         mono_start = time.monotonic()
+         routes, experts, local = self._host_routes(indices[start:stop])
+         route_end = time.monotonic()
+-        projection = self._store.projection(name, experts)
++        projection = self._store.projection(name, experts, self._expert_cache)
+         local_indices = mx.array(local, dtype=mx.int32).reshape(
+             *indices[start:stop].shape
+         )
+@@ -531,6 +627,7 @@ class DiskBackedSwitchGLU(nn.Module):
+         del projection
+         mx.clear_cache()
+         mono_end = time.monotonic()
++        cache_after = self._cache_telemetry_snapshot((name,))
+         route_seconds = route_end - mono_start
+         gather_seconds = gather_end - route_end
+         kernel_seconds = kernel_end - gather_end
+@@ -556,6 +653,8 @@ class DiskBackedSwitchGLU(nn.Module):
+                 "logical_requested_bytes": self._store.bytes_for(
+                     len(experts), (name,)
+                 ),
++                "cache_before": cache_before,
++                "cache_after": cache_after,
+                 "wall_epoch_seconds": wall_epoch,
+                 "monotonic_start_seconds": mono_start,
+                 "monotonic_end_seconds": mono_end,
+@@ -570,4 +669,9 @@ class DiskBackedSwitchGLU(nn.Module):
+         return output
+ 
+     def close(self) -> None:
+-        self._store.close()
++        if self._expert_cache is not None:
++            self._expert_cache.close_namespace(
++                self._store.cache_namespace, self._store.close
++            )
++        else:
++            self._store.close()
+diff --git a/tests/test_qwen4_paging_profile.py b/tests/test_qwen4_paging_profile.py
+index 4a4164c..312d1a5 100644
+--- a/tests/test_qwen4_paging_profile.py
++++ b/tests/test_qwen4_paging_profile.py
+@@ -7,6 +7,7 @@ import json
+ import os
+ import stat
+ import struct
++from pathlib import Path
+ 
+ import mlx.core as mx
+ import mlx.nn as nn
+@@ -21,12 +22,15 @@ compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+ 
+ @pytest.fixture(autouse=True)
+ def _fresh_profile(monkeypatch):
+-    from mlx_vlm.models.qwen4_exp import paging_profile
++    from mlx_vlm.models.qwen4_exp import expert_residency_cache, paging_profile
+ 
+     paging_profile._reset_profile_for_tests()
++    expert_residency_cache._reset_shared_expert_cache_for_tests()
+     monkeypatch.delenv("OMLX_QWEN4_SSD_PROFILE_PATH", raising=False)
++    monkeypatch.delenv("OMLX_QWEN4_SSD_EXPERT_CACHE_BYTES", raising=False)
+     yield
+     paging_profile._reset_profile_for_tests()
++    expert_residency_cache._reset_shared_expert_cache_for_tests()
+ 
+ 
+ def _payload(value: mx.array) -> tuple[str, bytes]:
+@@ -113,7 +117,7 @@ def test_profile_writer_is_private_exclusive_bounded_and_flushed(tmp_path):
+ 
+     capped = PagingProfileWriter(tmp_path / "cap.jsonl")
+     capped._size = MAX_FILE_BYTES
+-    with pytest.raises(OSError, match="32 MiB"):
++    with pytest.raises(OSError, match="128 MiB"):
+         capped.write({"type": "over-cap"})
+     with pytest.raises(RuntimeError, match="failed"):
+         capped.write({"type": "after-cap-failure"})
+@@ -217,6 +221,112 @@ def test_ssd_profile_preserves_bytes_routes_and_bounded_counters(tmp_path, monke
+     _assert_timings(projection_records, "total_seconds")
+ 
+ 
++def test_ssd_profile_direct_cache_telemetry_uses_selected_tiny_fixture(
++    tmp_path, monkeypatch
++):
++    """Trace real read_rows work, not inferred cache or SSD I/O events."""
++    from mlx_vlm.models.qwen4_exp import expert_residency_cache, ssd_experts
++    from mlx_vlm.models.qwen4_exp.ssd_experts import DiskBackedSwitchGLU
++
++    selected = (
++        Path(__file__).resolve().parents[1]
++        / "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp"
++        / "ssd_experts.py"
++    ).resolve()
++    assert Path(ssd_experts.__file__).resolve() == selected
++
++    _expert_fixture(tmp_path)
++    trace_path = tmp_path / "direct-cache.jsonl"
++    monkeypatch.setenv("OMLX_QWEN4_SSD_PROFILE_PATH", str(trace_path))
++    x = mx.ones((1, 64), dtype=mx.bfloat16)
++    routes = mx.array([[1, 1, 2]], dtype=mx.int32)
++
++    # Default off must retain genuine direct reads and must not manufacture
++    # cache events. Two unique experts require all three projections/suffixes.
++    off = DiskBackedSwitchGLU(tmp_path, 3, 64, 64, 12, max_tokens=2)
++    entry_bytes = off._store._expert_entry_bytes
++    off_output = off(x, routes)
++    mx.eval(off_output)
++    off.close()
++    off_record = json.loads(trace_path.read_bytes().splitlines()[0])
++    assert off_record["cache_before"]["cache"] is None
++    assert off_record["cache_after"]["cache"] is None
++    assert off_record["cache_before"]["cache_mode"] == "off"
++    assert off_record["cache_before"]["budget_bytes"] == 0
++    assert off_record["cache_after"]["global_stats"] is None
++    assert (
++        off_record["cache_after"]["logical_read_calls"]
++        - off_record["cache_before"]["logical_read_calls"]
++        == 9
++    )
++    assert (
++        off_record["cache_after"]["logical_read_requested_bytes"]
++        - off_record["cache_before"]["logical_read_requested_bytes"]
++        == 2 * entry_bytes
++    )
++
++    # Two complete groups fit; the first switch call loads them, the repeated
++    # call hits, and a different pair forces the resident LRU to evict.
++    expert_residency_cache._reset_shared_expert_cache_for_tests()
++    monkeypatch.setenv("OMLX_QWEN4_SSD_EXPERT_CACHE_BYTES", str(2 * entry_bytes))
++    pager = DiskBackedSwitchGLU(tmp_path, 3, 64, 64, 12, max_tokens=2)
++    first = pager(x, mx.array([[1, 2]], dtype=mx.int32))
++    repeated = pager(x, mx.array([[1, 2]], dtype=mx.int32))
++    evicted = pager(x, mx.array([[3, 4]], dtype=mx.int32))
++    expanded = mx.expand_dims(x, (-2, -3))
++    projected = pager.up_proj(
++        expanded, mx.array([[4, 3]], dtype=mx.int32), sorted_indices=False
++    )
++    mx.eval(first, repeated, evicted, projected)
++
++    records = [json.loads(line) for line in trace_path.read_bytes().splitlines()][1:]
++    assert len(records) == 4
++    first_record, repeated_record, evicted_record, projection_record = records
++
++    for record in records:
++        before, after = record["cache_before"], record["cache_after"]
++        assert before["cache"] == after["cache"] == "process_shared_resident"
++        assert before["cache_mode"] == after["cache_mode"] == "process_shared_resident"
++        assert before["budget_bytes"] == after["budget_bytes"] == 2 * entry_bytes
++        assert before["bank_namespace"] == after["bank_namespace"] == pager._store.cache_namespace
++        assert before["full_expert_entry_bytes"] == entry_bytes
++        assert after["full_expert_entry_bytes"] == entry_bytes
++        assert after["global_stats"]["resident_bytes"] <= 2 * entry_bytes
++        assert (
++            after["global_stats"]["entry_count"] * entry_bytes
++            == after["global_stats"]["resident_bytes"]
++        )
++        misses = (
++            after["global_stats"]["misses"] - before["global_stats"]["misses"]
++        )
++        assert (
++            after["logical_read_calls"] - before["logical_read_calls"]
++            == 9 * misses
++        )
++        assert (
++            after["logical_read_requested_bytes"]
++            - before["logical_read_requested_bytes"]
++            == entry_bytes * misses
++        )
++
++    assert first_record["cache_after"]["global_stats"]["misses"] - first_record[
++        "cache_before"
++    ]["global_stats"]["misses"] == 2
++    assert repeated_record["cache_after"]["global_stats"]["hits"] - repeated_record[
++        "cache_before"
++    ]["global_stats"]["hits"] == 6
++    assert repeated_record["cache_after"]["logical_read_calls"] == repeated_record[
++        "cache_before"
++    ]["logical_read_calls"]
++    assert evicted_record["cache_after"]["global_stats"]["evictions"] - evicted_record[
++        "cache_before"
++    ]["global_stats"]["evictions"] == 2
++    assert projection_record["projection"] == "up_proj"
++    assert projection_record["cache_before"]["projection_count"] == 1
++    assert projection_record["cache_after"]["projection_order"] == ["up_proj"]
++    pager.close()
++
++
+ def _assert_timings(records, total_key):
+     keys = (
+         "route_host_wait_seconds",
+diff --git a/tests/test_soak_profile_capacity.py b/tests/test_soak_profile_capacity.py
+new file mode 100644
+index 0000000..2001eed
+--- /dev/null
++++ b/tests/test_soak_profile_capacity.py
+@@ -0,0 +1,38 @@
++import importlib.util,json,tempfile,unittest
++from pathlib import Path
++ROOT=Path(__file__).resolve().parents[1]
++PATH=ROOT/'omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/paging_profile.py'
++from typing import Any
++spec=importlib.util.spec_from_file_location('isolated_sink',PATH)
++if spec is None or spec.loader is None:raise RuntimeError('profile source loader unavailable')
++profile: Any=importlib.util.module_from_spec(spec)
++spec.loader.exec_module(profile)
++class Tests(unittest.TestCase):
++    def test_limit_is_bounded_128_mib(self):self.assertEqual(profile.MAX_FILE_BYTES,128*1024**2)
++    def test_actual_more_than_32_mib_of_records(self):
++        with tempfile.TemporaryDirectory() as td:
++            p=Path(td)/'trace.jsonl';w=profile.PagingProfileWriter(p)
++            try:
++                record={'data':'x'*32700}
++                for _ in range(2048):w.write(record)
++                self.assertGreater(p.stat().st_size,32*1024**2)
++                self.assertLess(p.stat().st_size,profile.MAX_FILE_BYTES)
++            finally:w.close()
++    def test_finite_limit_failure_stays_latched(self):
++        old=profile.MAX_FILE_BYTES;profile.MAX_FILE_BYTES=100
++        try:
++            with tempfile.TemporaryDirectory() as td:
++                w=profile.PagingProfileWriter(Path(td)/'trace.jsonl')
++                try:
++                    w.write({'data':'x'*50})
++                    with self.assertRaises(OSError):w.write({'data':'x'*50})
++                    with self.assertRaises(RuntimeError):w.write({})
++                finally:w.close()
++        finally:profile.MAX_FILE_BYTES=old
++    def test_record_limit_not_weakened(self):
++        with tempfile.TemporaryDirectory() as td:
++            w=profile.PagingProfileWriter(Path(td)/'trace.jsonl')
++            try:
++                with self.assertRaises(ValueError):w.write({'data':'x'*(64*1024)})
++            finally:w.close()
++if __name__=='__main__':unittest.main()
+diff --git a/tests/test_ssd_expert_cache_concurrency.py b/tests/test_ssd_expert_cache_concurrency.py
+new file mode 100644
+index 0000000..5b09971
+--- /dev/null
++++ b/tests/test_ssd_expert_cache_concurrency.py
+@@ -0,0 +1,33 @@
++"""Parent CPU regressions for the process-shared cache."""
++from collections import OrderedDict
++import importlib.util,sys,threading,unittest
++from pathlib import Path
++P=Path(__file__).resolve().parents[1]/'omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/expert_residency_cache.py'
++spec=importlib.util.spec_from_file_location('parent_cache_race',P)
++assert spec is not None and spec.loader is not None
++m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
++class Tests(unittest.TestCase):
++ def test_hit_and_namespace_release_serialize(self):
++  cache=m.ExpertResidencyCache(100);value=cache.get_or_load(1,2,100,lambda _:object());entered=threading.Event();release=threading.Event();finished=threading.Event();errors=[];got=[]
++  class Paused(OrderedDict):
++   def move_to_end(self,key,last=True):entered.set();assert release.wait(3);return super().move_to_end(key,last=last)
++  cache._entries=Paused(cache._entries)
++  def hit():
++   try:got.append(cache.get_or_load(1,2,100,lambda _:None))
++   except BaseException as e:errors.append(e)
++  def discard():
++   try:cache.discard_namespace(1)
++   except BaseException as e:errors.append(e)
++   finally:finished.set()
++  a=threading.Thread(target=hit);b=threading.Thread(target=discard)
++  try:
++   a.start();self.assertTrue(entered.wait(2));b.start();finished.wait(.1)
++  finally:
++   release.set();a.join(3)
++   if b.ident is not None:b.join(3)
++  self.assertFalse(a.is_alive() or b.is_alive());self.assertEqual(errors,[]);self.assertEqual(got,[value]);self.assertEqual(cache.stats()['resident_bytes'],0)
++ def test_a_hit_rejects_a_different_byte_contract(self):
++  cache=m.ExpertResidencyCache(100);cache.get_or_load(1,2,80,lambda _:object())
++  with self.assertRaises(ValueError):cache.get_or_load(1,2,100,lambda _:None)
++  self.assertEqual(cache.stats()['resident_bytes'],80)
++if __name__=='__main__':unittest.main(verbosity=2)
+diff --git a/tests/test_ssd_expert_cache_retirement.py b/tests/test_ssd_expert_cache_retirement.py
+new file mode 100644
+index 0000000..e06385e
+--- /dev/null
++++ b/tests/test_ssd_expert_cache_retirement.py
+@@ -0,0 +1,30 @@
++"""Reviewer regression: selected pager close serializes with/rejects cold reloads."""
++import ast,copy,importlib.util,sys,threading,types,unittest
++from pathlib import Path
++ROOT=Path(__file__).resolve().parents[1];P=ROOT/'omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp'
++spec=importlib.util.spec_from_file_location('parent_cache_retire',P/'expert_residency_cache.py')
++assert spec is not None and spec.loader is not None
++m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
++tree=ast.parse((P/'ssd_experts.py').read_text());cls=next(x for x in tree.body if isinstance(x,ast.ClassDef)and x.name=='DiskBackedSwitchGLU');node=copy.deepcopy(next(x for x in cls.body if isinstance(x,ast.FunctionDef)and x.name=='close'));namespace={};exec(compile(ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[])),str(P/'ssd_experts.py'),'exec'),namespace);close=namespace['close']
++class Tests(unittest.TestCase):
++ def test_actual_close_rejects_new_cold_load_after_retirement(self):
++  c=m.ExpertResidencyCache(100);c.get_or_load(1,1,80,lambda _:object());entered=threading.Event();release=threading.Event();loads=[];errors=[]
++  def close_store():entered.set();assert release.wait(3)
++  pager=types.SimpleNamespace(_expert_cache=c,_store=types.SimpleNamespace(cache_namespace=1,close=close_store))
++  def reload():
++   try:c.get_or_load(1,2,80,lambda e:loads.append(e)or object())
++   except Exception as e:errors.append(e)
++  a=threading.Thread(target=lambda:close(pager));b=threading.Thread(target=reload)
++  try:a.start();self.assertTrue(entered.wait(2));b.start();b.join(.1)
++  finally:
++   release.set();a.join(3)
++   if b.ident is not None:b.join(3)
++  self.assertFalse(a.is_alive()or b.is_alive());self.assertEqual(loads,[]);self.assertEqual(len(errors),1);self.assertIsInstance(errors[0],RuntimeError);self.assertEqual(c.stats()['resident_bytes'],0)
++ def test_failed_store_close_still_retires_namespace(self):
++  c=m.ExpertResidencyCache(100);c.get_or_load(1,1,80,lambda _:object())
++  def fail():raise OSError('synthetic close failure')
++  pager=types.SimpleNamespace(_expert_cache=c,_store=types.SimpleNamespace(cache_namespace=1,close=fail))
++  with self.assertRaises(OSError):close(pager)
++  with self.assertRaises(RuntimeError):c.get_or_load(1,2,80,lambda _:object())
++  self.assertEqual(c.stats()['resident_bytes'],0)
++if __name__=='__main__':unittest.main(verbosity=2)
+diff --git a/tests/test_ssd_expert_residency_cache.py b/tests/test_ssd_expert_residency_cache.py
+new file mode 100644
+index 0000000..4c8744e
+--- /dev/null
++++ b/tests/test_ssd_expert_residency_cache.py
+@@ -0,0 +1,285 @@
++"""CPU-only checks for the default-off SSD expert residency-cache prototype."""
++
++from __future__ import annotations
++
++import ast
++import copy
++import gc
++import importlib.util
++import os
++from pathlib import Path
++import sys
++import unittest
++import weakref
++
++
++_ROOT = Path(__file__).resolve().parents[1]
++_CACHE_PATH = (
++    _ROOT
++    / "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp"
++    / "expert_residency_cache.py"
++)
++_SSD_PATH = _CACHE_PATH.with_name("ssd_experts.py")
++
++
++def _load_cache_module():
++    spec = importlib.util.spec_from_file_location("_test_expert_residency_cache", _CACHE_PATH)
++    assert spec and spec.loader
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++class _FakeModule:
++    def freeze(self):
++        self.frozen = True
++
++
++class _FakeQuantizedSwitchLinear(_FakeModule):
++    pass
++
++
++class _FakeNn:
++    Module = _FakeModule
++
++
++class _FakeMx:
++    @staticmethod
++    def concatenate(values, axis):
++        assert axis == 0
++        return ("concat", tuple(values))
++
++
++def _compiled_store_methods():
++    tree = ast.parse(_SSD_PATH.read_text(encoding="utf-8"))
++    store = next(
++        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_ExpertStore"
++    )
++    wanted = {"_cached_expert_rows", "projection"}
++    methods = [copy.deepcopy(node) for node in store.body if getattr(node, "name", None) in wanted]
++    assert {method.name for method in methods} == wanted
++    module = ast.Module(
++        body=[
++            ast.ImportFrom(
++                module="__future__",
++                names=[ast.alias(name="annotations")],
++                level=0,
++            ),
++            *methods,
++        ],
++        type_ignores=[],
++    )
++    namespace = {
++        "QuantizedSwitchLinear": _FakeQuantizedSwitchLinear,
++        "nn": _FakeNn,
++        "mx": _FakeMx,
++        "_PROJECTIONS": ("gate_proj", "up_proj", "down_proj"),
++        "_SUFFIXES": ("weight", "scales", "biases"),
++    }
++    exec(compile(ast.fix_missing_locations(module), str(_SSD_PATH), "exec"), namespace)
++    return namespace["_cached_expert_rows"], namespace["projection"]
++
++
++class ExpertResidencyCacheTests(unittest.TestCase):
++    def setUp(self):
++        self.cache_module = _load_cache_module()
++        self.cache_module._reset_shared_expert_cache_for_tests()
++
++    def tearDown(self):
++        self.cache_module._reset_shared_expert_cache_for_tests()
++
++    def test_default_off_and_invalid_configuration(self):
++        cache = self.cache_module.ExpertResidencyCache(0)
++        calls = []
++
++        values = cache.values_for(
++            1, [4, 4], 3, lambda expert: calls.append(expert) or (expert, object())
++        )
++
++        self.assertEqual(calls, [4, 4])
++        self.assertEqual([value[0] for value in values], [4, 4])
++        self.assertEqual(cache.stats()["resident_bytes"], 0)
++        self.assertEqual(self.cache_module.parse_cache_budget(None), 0)
++        self.assertEqual(self.cache_module.parse_cache_budget(""), 0)
++        for value in ("-1", " 1", "1 ", "1.5", "+1", "abc"):
++            with self.assertRaises(ValueError, msg=value):
++                self.cache_module.parse_cache_budget(value)
++
++    def test_same_namespace_hits_and_cross_namespace_cannot_alias(self):
++        cache = self.cache_module.ExpertResidencyCache(20)
++        calls = []
++
++        first = cache.get_or_load(10, 3, 5, lambda expert: calls.append((10, expert)) or object())
++        again = cache.get_or_load(10, 3, 5, lambda expert: calls.append((10, expert)) or object())
++        other = cache.get_or_load(11, 3, 5, lambda expert: calls.append((11, expert)) or object())
++
++        self.assertIs(first, again)
++        self.assertIsNot(first, other)
++        self.assertEqual(calls, [(10, 3), (11, 3)])
++        self.assertEqual(cache.stats()["hits"], 1)
++
++    def test_mixed_sizes_exact_recency_eviction_and_accounting(self):
++        cache = self.cache_module.ExpertResidencyCache(10)
++        loads = []
++
++        def load(expert):
++            loads.append(expert)
++            return f"expert-{expert}-{len(loads)}"
++
++        cache.get_or_load(1, 1, 3, load)  # A: [A]
++        cache.get_or_load(1, 2, 4, load)  # B: [A, B]
++        cache.get_or_load(1, 1, 3, load)  # touch A: [B, A]
++        cache.get_or_load(1, 3, 4, load)  # C: evict B => [A, C]
++        stats = cache.stats()
++        self.assertEqual(stats["resident_bytes"], 7)
++        self.assertEqual(stats["entry_count"], 2)
++        self.assertEqual(stats["evictions"], 1)
++        cache.get_or_load(1, 2, 4, load)  # B was the exact LRU and reloads.
++        self.assertEqual(loads, [1, 2, 3, 2])
++        self.assertEqual(cache.stats()["resident_bytes"], 8)
++        self.assertEqual(cache.stats()["entry_count"], 2)
++
++    def test_oversize_bypasses_without_evicting_useful_entries(self):
++        cache = self.cache_module.ExpertResidencyCache(8)
++        cached = cache.get_or_load(1, 1, 4, lambda _: object())
++        oversized = cache.get_or_load(1, 2, 9, lambda _: object())
++
++        self.assertIs(cached, cache.get_or_load(1, 1, 4, lambda _: object()))
++        self.assertNotEqual(cached, oversized)
++        self.assertEqual(cache.stats()["resident_bytes"], 4)
++        self.assertEqual(cache.stats()["entry_count"], 1)
++        self.assertEqual(cache.stats()["bypasses"], 1)
++
++    def test_loader_failure_does_not_charge_or_evict_and_can_retry(self):
++        cache = self.cache_module.ExpertResidencyCache(8)
++        survivor = cache.get_or_load(1, 1, 4, lambda _: object())
++        attempts = 0
++
++        def flaky(_):
++            nonlocal attempts
++            attempts += 1
++            if attempts == 1:
++                raise RuntimeError("fixture read failure")
++            return object()
++
++        with self.assertRaisesRegex(RuntimeError, "fixture read failure"):
++            cache.get_or_load(1, 2, 4, flaky)
++        self.assertEqual(cache.stats()["resident_bytes"], 4)
++        self.assertIs(survivor, cache.get_or_load(1, 1, 4, lambda _: object()))
++        loaded = cache.get_or_load(1, 2, 4, flaky)
++        self.assertIs(loaded, cache.get_or_load(1, 2, 4, flaky))
++        self.assertEqual(attempts, 2)
++        self.assertEqual(cache.stats()["resident_bytes"], 8)
++
++    def test_values_for_preserves_route_order_and_duplicates(self):
++        cache = self.cache_module.ExpertResidencyCache(30)
++        loaded = []
++        values = cache.values_for(
++            22,
++            [3, 1, 3, 2],
++            5,
++            lambda expert: loaded.append(expert) or f"group-{expert}",
++        )
++
++        self.assertEqual(values, ["group-3", "group-1", "group-3", "group-2"])
++        self.assertEqual(loaded, [3, 1, 2])
++        self.assertEqual(cache.stats()["resident_bytes"], 15)
++
++    def test_shared_cache_is_one_per_process_and_namespace_does_not_retain_instance(self):
++        old = os.environ.get(self.cache_module.CACHE_BUDGET_ENV)
++        os.environ[self.cache_module.CACHE_BUDGET_ENV] = "12"
++        try:
++            first = self.cache_module.get_shared_expert_cache()
++            second = self.cache_module.get_shared_expert_cache()
++            self.assertIs(first, second)
++            self.assertIsNotNone(first)
++            first_namespace = self.cache_module.new_expert_bank_namespace()
++            second_namespace = self.cache_module.new_expert_bank_namespace()
++            self.assertNotEqual(first_namespace, second_namespace)
++
++            class Bank:
++                pass
++
++            bank = Bank()
++            bank_ref = weakref.ref(bank)
++            first.get_or_load(first_namespace, 7, 4, lambda _: "first-bank")
++            del bank
++            gc.collect()
++            self.assertIsNone(bank_ref())
++            self.assertEqual(first.discard_namespace(first_namespace), 1)
++            self.assertEqual(first.stats()["resident_bytes"], 0)
++            self.assertEqual(
++                first.get_or_load(second_namespace, 7, 4, lambda _: "second-bank"),
++                "second-bank",
++            )
++            os.environ[self.cache_module.CACHE_BUDGET_ENV] = "13"
++            with self.assertRaisesRegex(RuntimeError, "already initialized"):
++                self.cache_module.get_shared_expert_cache()
++        finally:
++            if old is None:
++                os.environ.pop(self.cache_module.CACHE_BUDGET_ENV, None)
++            else:
++                os.environ[self.cache_module.CACHE_BUDGET_ENV] = old
++
++    def test_extracted_ssd_callsite_keeps_off_path_and_enabled_route_order(self):
++        cached_rows, projection = _compiled_store_methods()
++        cache = self.cache_module.ExpertResidencyCache(100)
++
++        class Store:
++            cache_namespace = 9
++            _expert_entry_bytes = 9
++            prefix = "bank"
++            group_size = 64
++            bits = 4
++            mode = "affine"
++            _expert_cache_keys = tuple(
++                f"{projection}.{suffix}"
++                for projection in ("gate_proj", "up_proj", "down_proj")
++                for suffix in ("weight", "scales", "biases")
++            )
++
++            def __init__(self):
++                self.direct_reads = []
++                self.loads = []
++
++            def read_rows(self, key, rows):
++                self.direct_reads.append((key, tuple(rows)))
++                return ("direct", key, tuple(rows))
++
++            def _read_expert(self, expert):
++                self.loads.append(expert)
++                return tuple(f"{expert}:{key}" for key in self._expert_cache_keys)
++
++        Store._cached_expert_rows = cached_rows
++        Store.projection = projection
++        store = Store()
++
++        direct = store.projection("up_proj", [5, 2], cache=None)
++        self.assertEqual(
++            store.direct_reads,
++            [
++                ("bank.up_proj.weight", (5, 2)),
++                ("bank.up_proj.scales", (5, 2)),
++                ("bank.up_proj.biases", (5, 2)),
++            ],
++        )
++        self.assertEqual(direct.weight, ("direct", "bank.up_proj.weight", (5, 2)))
++
++        enabled = store.projection("up_proj", [5, 2], cache=cache)
++        reordered = store.projection("up_proj", [2, 5], cache=cache)
++        self.assertEqual(store.loads, [5, 2])
++        self.assertEqual(
++            enabled.weight,
++            ("concat", ("5:up_proj.weight", "2:up_proj.weight")),
++        )
++        self.assertEqual(
++            reordered.weight,
++            ("concat", ("2:up_proj.weight", "5:up_proj.weight")),
++        )
++        self.assertTrue(enabled.frozen)
++        self.assertTrue(hasattr(enabled, "_ssd_cache_staging"))
++
++
++if __name__ == "__main__":
++    unittest.main()
