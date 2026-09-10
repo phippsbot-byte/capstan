@@ -1,0 +1,32 @@
+# Experimental guarded profile. It is dormant; parent-led admission owns launch.
+[model]
+id = "omlx-qwen4-ssd-expert-cache-off"
+model_id = "qwen4-ssd-expert-cache-experimental"
+endpoint = "http://127.0.0.1:18144/v1"
+description = "Experimental Qwen4 selected-expert cache profile."
+
+[start]
+command = ["$CAPSTAN_OMLX_PYTHON", "-m", "omlx.cli", "serve", "--base-path", "$CAPSTAN_QWEN4_BASE_PATH", "--host", "127.0.0.1", "--port", "18144", "--no-hf-cache", "--no-cache", "--hot-cache-max-size", "0", "--memory-guard", "balanced", "--max-concurrent-requests", "1"]
+cwd = "$CAPSTAN_QWEN4_BASE_PATH"
+log_path = "$CAPSTAN_QWEN4_STATE_DIR/qwen4-ssd-expert-cache-off.log"
+pid_path = "$CAPSTAN_QWEN4_STATE_DIR/qwen4-ssd-expert-cache-off.pid.json"
+startup_timeout_sec = 300
+readiness_url = "http://127.0.0.1:18144/v1/models"
+readiness_contains = ""
+
+[start.env]
+PYTHONPATH = "$CAPSTAN_OMLX_RUNTIME_ROOT"
+OMLX_QWEN4_SSD_EXPERT_LAYERS = "0,1,46,47"
+OMLX_QWEN4_MMAP_DEDUPE_MATERIALIZE = "1"
+OMLX_QWEN4_MMAP_STAGED_RECLAIM = "1"
+OMLX_QWEN4_SSD_EXPERT_CACHE_BYTES = "0"
+OMLX_QWEN4_SSD_PROFILE_PATH = "$CAPSTAN_QWEN4_PROFILE_PATH"
+OMLX_QWEN4_LOAD_TELEMETRY = "$CAPSTAN_QWEN4_LOAD_TELEMETRY_PATH"
+
+[preflight]
+required_paths = ["$CAPSTAN_OMLX_RUNTIME_ROOT", "$CAPSTAN_QWEN4_BASE_PATH", "$CAPSTAN_QWEN4_MODEL_DIR", "$CAPSTAN_QWEN4_MODEL_SETTINGS_PATH"]
+exclusive_ports = [18144]
+
+[fleet]
+enabled = false
+reason = "Experimental guarded profile; no automatic fleet activation."
