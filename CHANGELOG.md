@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Recheck the authenticated process generation and health under lifecycle locks before supervisor stop or restart actions.
+- Restrict doctor cleanup to revalidated, proven-dead PID state and preserve uncertain blockers.
+- Clean up authenticated spawned processes on cancellation and fail closed when rotation recovery cannot certify target death.
+- Bind promotion receipts to the same manifest-relative working directory and effective environment used for launch.
+
 ## v0.24.6
 
 - Bind promotion receipts to the exact effective child environment, including inherited variables plus `[start.env]` overrides, without exposing values.

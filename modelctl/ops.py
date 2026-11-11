@@ -6,6 +6,8 @@ import shutil
 import time
 
 from .http import http_json
+from . import runner
+from .lifecycle import LifecycleLockError, lifecycle_lock, resolve_manifest_path
 from .manifest import ModelManifest
 from .runner import active_pid, default_log_path, default_pid_path, pid_state_owner_mismatch, readiness_check, read_pid_state, start as start_model, stop
 from .system import disk_free_gib, human_bytes, path_size_bytes, port_is_free, swap_used_gib
@@ -431,20 +433,35 @@ def doctor(manifest: ModelManifest) -> dict[str, Any]:
 
 def doctor_fix(manifest: ModelManifest) -> dict[str, Any]:
     fixes: list[dict[str, Any]] = []
-    pid_path = default_pid_path(manifest)
-    pid_state = read_pid_state(manifest)
-    if pid_path.exists() and pid_state is None:
-        pid_path.unlink()
-        fixes.append({"code": "invalid_pid_state_removed", "path": str(pid_path)})
-    elif pid_state and active_pid(manifest) is None:
-        if pid_state_owner_mismatch(manifest, pid_state):
-            fixes.append({"code": "pid_state_owner_mismatch_preserved", "path": str(pid_path), "pid_state": pid_state})
-        else:
-            pid_path.unlink()
-            fixes.append({"code": "stale_pid_state_removed", "path": str(pid_path), "pid_state": pid_state})
+    pid_path = runner._state_path(manifest)
+    try:
+        with lifecycle_lock("doctor_fix", manifest):
+            inspection = runner._inspect(manifest)
+            state_status = inspection["status"]
+            if state_status == "dead":
+                snapshot = inspection["snapshot"]
+                identity = inspection["identity"]
+
+                def same_dead_state(raw: Any) -> bool:
+                    checked = runner._inspect(manifest)
+                    current = checked.get("snapshot")
+                    return bool(checked.get("status") == "dead" and checked.get("identity") == identity
+                        and current is not None and (current.device, current.inode, current.payload)
+                        == (snapshot.device, snapshot.inode, snapshot.payload)
+                        and runner._validate_active(manifest, raw) == identity)
+
+                removed, error = runner._guarded_remove(manifest, same_dead_state)
+                fixes.append({"code": "stale_pid_state_removed" if removed else "pid_state_changed_preserved",
+                              "path": str(pid_path), "error": error})
+            elif state_status not in {"absent", "live"}:
+                code = "pid_state_owner_mismatch_preserved" if state_status in {"owner_mismatch", "blocked"} else "pid_state_" + state_status + "_preserved"
+                fixes.append({"code": code, "path": str(pid_path), "status": state_status, "error": inspection.get("error")})
+    except LifecycleLockError as exc:
+        fixes.append({"code": "pid_state_lock_failed_preserved", "path": str(pid_path), "lock": exc.failure.as_dict()})
 
     if manifest.start:
-        for code, path in (("pid_dir_created", default_pid_path(manifest).parent), ("log_dir_created", default_log_path(manifest).parent)):
+        log_path = resolve_manifest_path(manifest, default_log_path(manifest))
+        for code, path in (("pid_dir_created", pid_path.parent), ("log_dir_created", log_path.parent)):
             existed = path.exists()
             path.mkdir(parents=True, exist_ok=True)
             if not existed:
@@ -505,6 +522,46 @@ def bench(manifest: ModelManifest, prompt_chars: list[int], repeats: int = 1, ma
     }
 
 
+def _generation(manifest: ModelManifest) -> tuple[Any, ...] | None:
+    inspection = runner._inspect(manifest)
+    snapshot = inspection.get("snapshot")
+    identity = inspection.get("identity")
+    if inspection.get("status") not in {"live", "dead"} or snapshot is None or identity is None:
+        return None
+    return (snapshot.device, snapshot.inode, snapshot.payload, identity)
+
+
+def _supervised_mutation(manifest: ModelManifest, generation: tuple[Any, ...] | None, check: Any, *, restart: bool, wait: bool = True) -> dict[str, Any]:
+    kind = "restart" if restart else "stop"
+    if generation is None:
+        return {"type": kind + "_skipped", "reason": "generation_unproven"}
+    try:
+        with lifecycle_lock(kind, manifest, blocking=False):
+            if _generation(manifest) != generation:
+                return {"type": kind + "_skipped", "reason": "generation_changed"}
+            checked = check()
+            if not checked.get("breached"):
+                return {"type": kind + "_skipped", "reason": "health_recovered", "recheck": checked}
+            if _generation(manifest) != generation:
+                return {"type": kind + "_skipped", "reason": "generation_changed", "recheck": checked}
+            stopped = runner._stop_locked(manifest, 10)
+            action = {"type": kind, "stop": stopped, "recheck": checked}
+            if restart and stopped.get("ok") is True and stopped.get("safe_to_start") is True:
+                started = runner._start_locked(manifest, wait)
+                action["start"] = started
+                if started.get("ok") is True and started.get("started") is True:
+                    inspection = runner._inspect(manifest)
+                    identity = inspection.get("identity")
+                    if inspection.get("status") == "live" and identity is not None and identity.leader_pid == started.get("pid"):
+                        ownership = runner._endpoint_owned(manifest, identity)
+                        action["endpoint_ownership"] = ownership
+                        if ownership.get("owned") is True:
+                            action["recovery_check"] = check()
+            return action
+    except LifecycleLockError as exc:
+        return {"type": kind + "_skipped", "reason": "lock_failed", "lock": exc.failure.as_dict()}
+
+
 def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duration_sec: float = 0.0, interval_sec: float = 10.0, stop_on_breach: bool = False) -> dict[str, Any]:
     ceiling = max_swap_gib if max_swap_gib is not None else (manifest.health.max_swap_gib if manifest.health.max_swap_gib is not None else manifest.preflight.max_swap_gib)
     samples: list[dict[str, Any]] = []
@@ -512,6 +569,7 @@ def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duratio
     breached = False
     stop_result: dict[str, Any] | None = None
     while True:
+        generation = _generation(manifest) if stop_on_breach else None
         used = swap_used_gib()
         ready = False
         readiness_error = None
@@ -535,7 +593,14 @@ def watchdog(manifest: ModelManifest, max_swap_gib: float | None = None, duratio
         samples.append(sample)
         if breached:
             if stop_on_breach:
-                stop_result = stop(manifest)
+                def recheck() -> dict[str, Any]:
+                    return watchdog(manifest, max_swap_gib=ceiling, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
+                action = _supervised_mutation(manifest, generation, recheck, restart=False)
+                stopped = action.get("stop")
+                stop_result = {**stopped, "supervision": action} if isinstance(stopped, dict) else {
+                    "ok": False, "stopped": False, "safe_to_start": False,
+                    "status": action.get("reason"), "supervision": action,
+                }
             break
         if duration_sec <= 0 or time.time() >= deadline:
             break
@@ -589,41 +654,37 @@ def daemon(
     rows: list[dict[str, Any]] = []
     index = 0
     ok = True
-    while True:
-        index += 1
+    def sample_health() -> dict[str, Any]:
         if effective_health_mode:
-            sample = health(
-                manifest,
-                max_swap_gib=effective_max_swap_gib,
-                max_swap_delta_gib=effective_max_swap_delta_gib,
-                sample_sec=effective_sample_sec,
-                include_smoke=effective_include_smoke,
-                max_latency_sec=effective_max_latency_sec,
-                max_prompt_latency_sec=effective_max_prompt_latency_sec,
+            observed = health(
+                manifest, max_swap_gib=effective_max_swap_gib, max_swap_delta_gib=effective_max_swap_delta_gib,
+                sample_sec=effective_sample_sec, include_smoke=effective_include_smoke,
+                max_latency_sec=effective_max_latency_sec, max_prompt_latency_sec=effective_max_prompt_latency_sec,
                 max_completion_latency_sec=effective_max_completion_latency_sec,
             )
-            first = sample
-            breached = not bool(sample.get("ok"))
-            row_time = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        else:
-            sample = watchdog(manifest, max_swap_gib=effective_max_swap_gib, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
-            first = sample["samples"][0] if sample.get("samples") else {}
-            breached = bool(sample.get("breached"))
-            row_time = first.get("time")
+            return {"breached": not bool(observed.get("ok")), "sample": observed, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        observed = watchdog(manifest, max_swap_gib=effective_max_swap_gib, duration_sec=0, interval_sec=interval_sec, stop_on_breach=False)
+        first = observed["samples"][0] if observed.get("samples") else {}
+        return {"breached": bool(observed.get("breached")), "sample": first, "time": first.get("time")}
+
+    while True:
+        index += 1
+        generation = _generation(manifest) if restart and manifest.start is not None else None
+        observed = sample_health()
+        first = observed["sample"]
+        breached = observed["breached"]
+        row_time = observed["time"]
         action: dict[str, Any] | None = None
         if breached:
-            ok = False
+            recovered = False
             if restart:
                 if manifest.start is None:
                     action = {"type": "restart_skipped", "reason": "manifest_has_no_start"}
                 else:
-                    stopped = stop(manifest)
-                    started = start_model(manifest, wait=wait)
-                    action = {"type": "restart", "stop": stopped, "start": started}
-                    # If restart restored readiness, keep the daemon result green.
-                    readiness = started.get("readiness") if isinstance(started, dict) else None
-                    if isinstance(readiness, dict) and readiness.get("ready"):
-                        ok = True
+                    action = _supervised_mutation(manifest, generation, sample_health, restart=True, wait=wait)
+                    recovery_check = action.get("recovery_check")
+                    recovered = bool(isinstance(recovery_check, dict) and not recovery_check.get("breached"))
+            ok = ok and recovered
         rows.append({"index": index, "time": row_time, "breached": breached, "sample": first, "action": action})
         if iterations is not None and index >= iterations:
             break

@@ -202,3 +202,15 @@ For bigger models, add a soak outside this CLI for now:
 - long prompt x1
 - repeated prefix x2
 - swap sampling before/after
+
+### Bounded consistency and cancellation behavior
+
+Supervisor restart and watchdog stop-on-breach record the validated PID-state generation before sampling health. They attempt the existing lifecycle lock without waiting, then recheck both the generation and the relevant health conditions while holding it. A contended lock, unproven or changed generation, or recovered health prevents the mutation. A restart requires a successful, safe stop; recovery is reported only after a successful start and a fresh health check.
+
+`doctor --fix` inspects state under the lifecycle lock using the manifest-relative PID-state path. It removes only a revalidated, identity-matched record whose leader and group are proven dead. Pending, live-group, malformed, foreign, changed, or otherwise unproven records remain in place with a diagnostic. File identity checks protect cooperating lifecycle operations; they do not make pathname deletion atomic against a hostile same-user filesystem writer.
+
+On cancellation during post-spawn readiness or rotation, the runner attempts authenticated cleanup and propagates the original cancellation. A spawned process remains recorded in the cancellation result; uncertain cleanup retains its blocker and prevents incumbent restoration. Interruption during process creation itself can leave uncertain ownership and a pending blocker. These measures do not provide atomic process creation or recovery from SIGKILL or power loss; those require a durable recovery or guardian design.
+
+Receipt binding resolves the launch working directory relative to the manifest, as launch does, and fingerprints the same effective environment. The launch command retains the configured interpreter path.
+
+This cut does not define the durable promotion contract or full crash recovery (F-04), campaign FINAL publication (F-06), divergent retry behavior (F-07), a default streaming guard (F-08), cache amplification (F-10), or a deep prefix-cache review.

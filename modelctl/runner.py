@@ -13,7 +13,7 @@ import subprocess
 import time
 
 from .http import http_json
-from .lifecycle import LifecycleLockError, endpoint_identity, lifecycle_lock
+from .lifecycle import LifecycleLockError, endpoint_identity, lifecycle_lock, resolve_manifest_path
 from .manifest import ModelManifest
 from .system import (
     ProcessIdentity,
@@ -167,14 +167,19 @@ def _canonical_command(command: list[str]) -> list[str]:
     return result
 
 
+def _launch_cwd(manifest: ModelManifest) -> Path:
+    if manifest.start is None:
+        raise ValueError("manifest has no [start] section")
+    if manifest.start.cwd is None:
+        return Path(manifest.path).expanduser().resolve(strict=False).parent
+    return resolve_manifest_path(manifest, manifest.start.cwd)
+
+
 def _launch_fingerprint(manifest: ModelManifest) -> dict[str, Any]:
     if manifest.start is None:
         raise ValueError("manifest has no [start] section")
     command = _canonical_command(manifest.start.command)
-    cwd = Path(manifest.start.cwd or manifest.path.parent).expanduser()
-    if not cwd.is_absolute():
-        cwd = manifest.path.parent / cwd
-    cwd_text = str(cwd.resolve(strict=False))
+    cwd_text = str(_launch_cwd(manifest))
     digest = hashlib.sha256(json.dumps({"command": command, "cwd": cwd_text}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {"command": command, "cwd": cwd_text, "sha256": digest}
 
@@ -334,6 +339,12 @@ def _remove_if(manifest: ModelManifest, predicate: Callable[[Any], bool]) -> boo
     except PIDStateError:
         return False
     if snapshot is None or not predicate(snapshot.raw):
+        return False
+    try:
+        current = _read_snapshot(path)
+    except PIDStateError:
+        return False
+    if current is None or (current.device, current.inode, current.payload) != (snapshot.device, snapshot.inode, snapshot.payload):
         return False
     path.unlink()
     return True
@@ -522,14 +533,12 @@ def _start_locked(
         log_path = manifest.path.parent / log_path
     log_path = log_path.expanduser().resolve(strict=False)
     proc: subprocess.Popen[Any] | None = None
+    spawn_attempted = False
     log = None
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = log_path.open("ab", buffering=0)
-        cwd = Path(manifest.start.cwd or manifest.path.parent).expanduser()
-        if not cwd.is_absolute():
-            cwd = manifest.path.parent / cwd
-        cwd = cwd.resolve(strict=False)
+        cwd = _launch_cwd(manifest)
         env = effective_launch_environment(manifest.start.env, cwd=cwd)
         pre_spawn = _run_pre_spawn_check(pre_spawn_check)
         if pre_spawn is not None and pre_spawn.get("ok") is not True:
@@ -545,6 +554,7 @@ def _start_locked(
                 "state_error": remove_error,
                 **_durability_fields(manifest, transaction_id),
             }
+        spawn_attempted = True
         proc = subprocess.Popen(
             manifest.start.command,
             cwd=str(cwd),
@@ -554,12 +564,24 @@ def _start_locked(
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except Exception as exc:
+    except BaseException as exc:
         if log is not None:
             try:
                 log.close()
-            except Exception:
+            except BaseException:
                 pass
+        if not isinstance(exc, Exception):
+            cleanup = None
+            if proc is not None:
+                try:
+                    cleanup = _cleanup_direct(proc)
+                except BaseException as cleanup_error:
+                    cleanup = {"group_death_certified": False, "error": f"{type(cleanup_error).__name__}: {cleanup_error}"}
+            if proc is None and not spawn_attempted:
+                _guarded_remove(manifest, lambda raw: _is_pending(manifest, raw, transaction_id))
+            exc.capstan_result = {"ok": False, "started": proc is not None, "spawn_uncertain": spawn_attempted and proc is None,
+                                  "cleanup": cleanup, **_durability_fields(manifest, transaction_id)}
+            raise
         if proc is None:
             removed, remove_error = _guarded_remove(manifest, lambda raw: _is_pending(manifest, raw, transaction_id))
             return {
@@ -574,15 +596,33 @@ def _start_locked(
         cleanup = _cleanup_direct(proc)
         return {"ok": False, "started": True, "status": "post_spawn_exception", "pid": proc.pid, "cleanup": cleanup, **_durability_fields(manifest, transaction_id), "error": f"{type(exc).__name__}: {exc}"}
 
+    def cancel_spawn(exc: BaseException, identity: ProcessIdentity | None) -> None:
+        try:
+            log.close()
+        except BaseException:
+            pass
+        try:
+            cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id) if identity else _cleanup_direct(proc)
+        except BaseException as cleanup_error:
+            cleanup = {"group_death_certified": False, "error": f"{type(cleanup_error).__name__}: {cleanup_error}"}
+        exc.capstan_result = {"ok": False, "started": True, "pid": proc.pid, "cleanup": cleanup,
+                              **_durability_fields(manifest, transaction_id, identity)}
+
     capture_error: str | None = None
     try:
         identity = _capture_new_identity(proc)
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            cancel_spawn(exc, None)
+            raise
         identity = None
         capture_error = f"{type(exc).__name__}: {exc}"
     try:
         log.close()
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            cancel_spawn(exc, identity)
+            raise
         cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id) if identity else _cleanup_direct(proc)
         return {"ok": False, "started": True, "status": "log_close_failed", "pid": proc.pid, "cleanup": cleanup, **_durability_fields(manifest, transaction_id, identity), "error": f"{type(exc).__name__}: {exc}"}
     if identity is None:
@@ -595,35 +635,55 @@ def _start_locked(
     try:
         _replace_pending(manifest, transaction_id, _active_state(manifest, identity, log_path))
         retain_popen(proc)
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            cancel_spawn(exc, identity)
+            raise
         cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id)
         return {"ok": False, "started": True, "status": "activation_failed", "pid": proc.pid, "cleanup": cleanup, **_durability_fields(manifest, transaction_id, identity), "error": f"{type(exc).__name__}: {exc}"}
 
-    result: dict[str, Any] = {"ok": True, "started": True, "pid": identity.leader_pid, "pid_path": str(default_pid_path(manifest)), "log_path": str(default_log_path(manifest))}
-    if wait:
-        try:
-            readiness = wait_ready(manifest, timeout_sec=readiness_timeout_sec)
-            ownership = _endpoint_owned(manifest, identity) if readiness.get("ready") else {"owned": False}
-        except Exception as exc:
-            cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id)
-            result.update({
-                "ok": False,
-                "status": "readiness_exception",
-                "error": f"{type(exc).__name__}: {exc}",
-                "cleanup": cleanup,
-                **_durability_fields(manifest, transaction_id, identity),
-            })
-            return result
-        result.update({"readiness": readiness, "endpoint_ownership": ownership})
-        if not readiness.get("ready") or not ownership.get("owned"):
-            cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id)
-            result.update({
-                "ok": False,
-                "status": "readiness_failed" if not readiness.get("ready") else "endpoint_ownership_failed",
-                "cleanup": cleanup,
-                **_durability_fields(manifest, transaction_id, identity),
-            })
-    return result
+    # Keep cancellation coverage across the entire readiness disposition.
+    try:
+        result: dict[str, Any] = {"ok": True, "started": True, "pid": identity.leader_pid, "pid_path": str(default_pid_path(manifest)), "log_path": str(default_log_path(manifest))}
+        if wait:
+            try:
+                readiness = wait_ready(manifest, timeout_sec=readiness_timeout_sec)
+                ownership = _endpoint_owned(manifest, identity) if readiness.get("ready") else {"owned": False}
+            except BaseException as exc:
+                cancellation = exc if not isinstance(exc, Exception) else None
+                try:
+                    cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id)
+                except BaseException as cleanup_error:
+                    cleanup = {"group_death_certified": False, "error": f"{type(cleanup_error).__name__}: {cleanup_error}"}
+                    if cancellation is None and not isinstance(cleanup_error, Exception):
+                        cancellation = cleanup_error
+                result.update({
+                    "ok": False,
+                    "status": "readiness_exception",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cleanup": cleanup,
+                    **_durability_fields(manifest, transaction_id, identity),
+                })
+                if cancellation is not None:
+                    cancellation.capstan_result = result
+                    if cancellation is exc:
+                        raise
+                    raise cancellation from exc
+                return result
+            result.update({"readiness": readiness, "endpoint_ownership": ownership})
+            if not readiness.get("ready") or not ownership.get("owned"):
+                cleanup = _cleanup_exact(manifest, identity, proc, transaction_id=transaction_id)
+                result.update({
+                    "ok": False,
+                    "status": "readiness_failed" if not readiness.get("ready") else "endpoint_ownership_failed",
+                    "cleanup": cleanup,
+                    **_durability_fields(manifest, transaction_id, identity),
+                })
+        return result
+    except BaseException as exc:
+        if not isinstance(exc, Exception) and not hasattr(exc, "capstan_result"):
+            cancel_spawn(exc, identity)
+        raise
 
 
 def start(manifest: ModelManifest, wait: bool = False) -> dict[str, Any]:
@@ -799,75 +859,92 @@ def _rotate_locked(
             "issues": ["target_pre_spawn_blocked"],
         }
 
-    stop_current = _stop_locked(current, stop_timeout_sec)
-    if stop_current.get("ok") is not True or stop_current.get("safe_to_start") is not True:
-        return {
-            **base,
-            "status": "current_stop_failed",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "issues": ["current_stop_failed"],
-        }
-
+    # Cancellation protection spans the complete mutation interval, including
+    # Python code between helper calls, not just the calls themselves.
     try:
-        if target_pre_spawn_check is None:
-            target_start = _start_locked(target, True, readiness_timeout_sec)
-        else:
-            target_start = _start_locked(target, True, readiness_timeout_sec, pre_spawn_check=target_pre_spawn_check)
-    except Exception as exc:
-        target_start = {"ok": False, "started": False, "status": "target_start_exception", "error": f"{type(exc).__name__}: {exc}"}
-    if target_start.get("ok") is not True:
-        recovery = _recover_rotation_locked(
-            current,
-            target,
-            stop_timeout_sec=stop_timeout_sec,
-            readiness_timeout_sec=readiness_timeout_sec,
-            restart_current=rollback,
-        )
-        failure_status = "target_not_ready" if target_start.get("status") in {"readiness_failed", "endpoint_ownership_failed", "readiness_exception"} else "target_start_failed"
+        stop_current = _stop_locked(current, stop_timeout_sec)
+        if stop_current.get("ok") is not True or stop_current.get("safe_to_start") is not True:
+            return {
+                **base,
+                "status": "current_stop_failed",
+                "old_pid": old_pid,
+                "stop_current": stop_current,
+                "issues": ["current_stop_failed"],
+            }
+
+        try:
+            if target_pre_spawn_check is None:
+                target_start = _start_locked(target, True, readiness_timeout_sec)
+            else:
+                target_start = _start_locked(target, True, readiness_timeout_sec, pre_spawn_check=target_pre_spawn_check)
+        except Exception as exc:
+            target_start = {"ok": False, "started": False, "status": "target_start_exception", "error": f"{type(exc).__name__}: {exc}"}
+        if target_start.get("ok") is not True:
+            recovery = _recover_rotation_locked(
+                current,
+                target,
+                stop_timeout_sec=stop_timeout_sec,
+                readiness_timeout_sec=readiness_timeout_sec,
+                restart_current=rollback,
+            )
+            failure_status = "target_not_ready" if target_start.get("status") in {"readiness_failed", "endpoint_ownership_failed", "readiness_exception"} else "target_start_failed"
+            return {
+                **base,
+                "status": failure_status,
+                "old_pid": old_pid,
+                "stop_current": stop_current,
+                "target_start": target_start,
+                "rollback": recovery,
+                "issues": ["target_start_failed"],
+            }
+
+        try:
+            handoff = _rotation_handoff_locked(current, target)
+        except Exception as exc:
+            recovery = _recover_rotation_locked(
+                current,
+                target,
+                stop_timeout_sec=stop_timeout_sec,
+                readiness_timeout_sec=readiness_timeout_sec,
+                restart_current=rollback,
+            )
+            return {
+                **base,
+                "status": "handoff_failed",
+                "old_pid": old_pid,
+                "stop_current": stop_current,
+                "target_start": target_start,
+                "rollback": recovery,
+                "error": f"{type(exc).__name__}: {exc}",
+                "issues": ["handoff_failed"],
+            }
+
         return {
             **base,
-            "status": failure_status,
+            "ok": True,
+            "status": "rotated",
             "old_pid": old_pid,
+            "new_pid": target_start.get("pid"),
             "stop_current": stop_current,
             "target_start": target_start,
-            "rollback": recovery,
-            "issues": ["target_start_failed"],
+            "readiness": target_start.get("readiness"),
+            "endpoint_ownership": target_start.get("endpoint_ownership"),
+            "handoff": handoff,
         }
-
-    try:
-        handoff = _rotation_handoff_locked(current, target)
-    except Exception as exc:
-        recovery = _recover_rotation_locked(
-            current,
-            target,
-            stop_timeout_sec=stop_timeout_sec,
-            readiness_timeout_sec=readiness_timeout_sec,
-            restart_current=rollback,
-        )
-        return {
-            **base,
-            "status": "handoff_failed",
-            "old_pid": old_pid,
-            "stop_current": stop_current,
-            "target_start": target_start,
-            "rollback": recovery,
-            "error": f"{type(exc).__name__}: {exc}",
-            "issues": ["handoff_failed"],
-        }
-
-    return {
-        **base,
-        "ok": True,
-        "status": "rotated",
-        "old_pid": old_pid,
-        "new_pid": target_start.get("pid"),
-        "stop_current": stop_current,
-        "target_start": target_start,
-        "readiness": target_start.get("readiness"),
-        "endpoint_ownership": target_start.get("endpoint_ownership"),
-        "handoff": handoff,
-    }
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            raise
+        details = getattr(exc, "capstan_result", {})
+        cleanup = details.get("cleanup") or {}
+        may_restore = not details.get("spawn_uncertain") and (not details.get("started") or cleanup.get("group_death_certified") is True)
+        try:
+            exc.capstan_recovery = _recover_rotation_locked(
+                current, target, stop_timeout_sec=stop_timeout_sec,
+                readiness_timeout_sec=readiness_timeout_sec, restart_current=rollback and may_restore,
+            )
+        except BaseException as recovery_error:
+            exc.capstan_recovery_error = f"{type(recovery_error).__name__}: {recovery_error}"
+        raise
 
 
 def rotate(
